@@ -2,6 +2,7 @@ import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
+import { NOTION_API_VERSION } from "../src/constants.js";
 import { exportSnapshot } from "../src/exporter/exporter.js";
 import { verifySnapshot } from "../src/verify/verifier.js";
 import { IDS, MockNotionApi, page, silentLogger } from "./helpers/mock-api.js";
@@ -215,6 +216,42 @@ describe("exporter", () => {
     expect(api.pageRetrievals.get(IDS.page1)).toBe(1);
     expect(api.pagePropertyRetrievals).toEqual([]);
     expect(stats.pages).toBe(1);
+    expect(await verifySnapshot(output)).toMatchObject({ valid: true });
+  });
+
+  it("disables resource reuse when the previous Notion API version differs", async () => {
+    const previous = await mkdtemp(join(tmpdir(), "notion-api-version-base-"));
+    await exportSnapshot({
+      roots: [IDS.page1],
+      output: previous,
+      assetConcurrency: 1,
+      api: fixtureApi(),
+      logger: silentLogger(),
+    });
+    const manifestPath = join(previous, "manifest.json");
+    const manifest = await readFile(manifestPath, "utf8");
+    await writeFile(
+      manifestPath,
+      manifest.replace(
+        `"notion_api_version": "${NOTION_API_VERSION}"`,
+        '"notion_api_version": "1900-01-01"',
+      ),
+    );
+
+    const output = await mkdtemp(join(tmpdir(), "notion-api-version-next-"));
+    const api = fixtureApi();
+    await exportSnapshot({
+      roots: [IDS.page1],
+      output,
+      incrementalFrom: previous,
+      assetConcurrency: 1,
+      api,
+      logger: silentLogger(),
+    });
+
+    expect(api.pagePropertyRetrievals.sort()).toEqual(
+      [`${IDS.page1}:rel`, `${IDS.page1}:rollup`].sort(),
+    );
     expect(await verifySnapshot(output)).toMatchObject({ valid: true });
   });
 

@@ -92,12 +92,12 @@ export async function exportSnapshot(
     ...(options.assetFetch ? { fetch: options.assetFetch } : {}),
   });
   const reusePrevious = previous
-    ? (await previousFormatMatches(previous)) &&
+    ? (await previousManifestMatches(previous)) &&
       (await previousSkipsMatch(previous, skipped))
     : false;
   if (previous && !reusePrevious) {
     options.logger.warn(
-      "Previous format or skip configuration differs; resource reuse disabled for safety",
+      "Previous format, Notion API version, or skip configuration differs; resource reuse disabled for safety",
     );
   }
   const state = new ExportState(
@@ -630,11 +630,15 @@ async function previousSkipsMatch(
   return JSON.stringify(prior.sort()) === JSON.stringify(skipped);
 }
 
-async function previousFormatMatches(previous: string): Promise<boolean> {
+async function previousManifestMatches(previous: string): Promise<boolean> {
   const manifest = JSON.parse(
     await readFile(resolve(previous, "manifest.json"), "utf8"),
   ) as unknown;
-  return isRecord(manifest) && manifest.format_version === FORMAT_VERSION;
+  return (
+    isRecord(manifest) &&
+    manifest.format_version === FORMAT_VERSION &&
+    manifest.notion_api_version === NOTION_API_VERSION
+  );
 }
 
 function requireSeparateSnapshotPaths(previous: string, output: string): void {
