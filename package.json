@@ -1,0 +1,42 @@
+{
+  "name": "notion-backup",
+  "version": "0.1.0",
+  "description": "Deterministic full-snapshot backups of Notion workspace subtrees",
+  "license": "0BSD",
+  "private": true,
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "notion-backup": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "clean": "node --eval \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run typecheck && npm test && npm run format:check",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@notionhq/client": "5.23.0",
+    "commander": "14.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.0",
+    "prettier": "3.6.2",
+    "typescript": "5.9.2",
+    "vitest": "3.2.7"
+  }
+}

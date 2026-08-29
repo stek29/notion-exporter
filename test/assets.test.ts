@@ -1,0 +1,86 @@
+import { mkdtemp, mkdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { describe, expect, it, vi } from "vitest";
+import { AssetManager } from "../src/assets/manager.js";
+import { SnapshotWriter } from "../src/snapshot/writer.js";
+import { silentLogger } from "./helpers/mock-api.js";
+
+describe("assets", () => {
+  it("hashes assets, deduplicates content, and reuses a validated cache", async () => {
+    const cache = await mkdtemp(join(tmpdir(), "notion-cache-"));
+    const firstOutput = await outputDirectory();
+    const networkFetch = vi.fn(fetch);
+    const first = new AssetManager({
+      writer: new SnapshotWriter(firstOutput),
+      cache,
+      concurrency: 2,
+      logger: silentLogger(),
+      fetch: networkFetch,
+    });
+    const input = {
+      type: "file",
+      name: "hello.txt",
+      file: { url: "data:text/plain;base64,aGVsbG8=", expiry_time: "volatile" },
+    };
+    const canonical = (await first.canonicalize(
+      [input, input],
+      "fixture",
+    )) as Array<{
+      file: { backup_asset: { sha256: string; path: string } };
+    }>;
+    expect(canonical[0]?.file.backup_asset.sha256).toBe(
+      canonical[1]?.file.backup_asset.sha256,
+    );
+    expect(networkFetch).toHaveBeenCalledTimes(1);
+
+    const emoji = (await first.canonicalize(
+      {
+        type: "custom_emoji",
+        custom_emoji: {
+          id: "88888888-8888-8888-8888-888888888888",
+          name: "hello",
+          url: "data:text/plain;base64,aGVsbG8=",
+        },
+      },
+      "emoji",
+    )) as {
+      custom_emoji: {
+        url?: string;
+        backup_asset: { sha256: string };
+      };
+    };
+    expect(emoji.custom_emoji.url).toBeUndefined();
+    expect(emoji.custom_emoji.backup_asset.sha256).toBe(
+      canonical[0]?.file.backup_asset.sha256,
+    );
+    await first.finalize();
+
+    const secondOutput = await outputDirectory();
+    const noNetwork = vi.fn(async () => {
+      throw new Error("network should not be used");
+    });
+    const second = new AssetManager({
+      writer: new SnapshotWriter(secondOutput),
+      cache,
+      concurrency: 1,
+      logger: silentLogger(),
+      fetch: noNetwork as typeof fetch,
+    });
+    const reused = (await second.canonicalize(input, "fixture")) as {
+      file: { backup_asset: { path: string } };
+    };
+    await second.finalize();
+    expect(noNetwork).not.toHaveBeenCalled();
+    expect(
+      await readFile(join(secondOutput, reused.file.backup_asset.path), "utf8"),
+    ).toBe("hello");
+  });
+});
+
+async function outputDirectory(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "notion-assets-"));
+  await mkdir(join(root, "assets", "sha256"), { recursive: true });
+  await mkdir(join(root, "assets", "metadata"), { recursive: true });
+  return root;
+}

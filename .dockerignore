@@ -1,0 +1,11 @@
+.git
+.github
+.env
+cache
+coverage
+dist
+export
+node_modules
+test
+*.log
+.DS_Store
