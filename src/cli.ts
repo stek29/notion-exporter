@@ -2,6 +2,7 @@
 import { Command, InvalidArgumentError, Option } from "commander";
 import { runExport } from "./commands/export.js";
 import { runVerify } from "./commands/verify.js";
+import { loadExportConfig } from "./config/export.js";
 import { loadNotionToken } from "./config/token.js";
 import { EXPORTER_VERSION } from "./constants.js";
 import type { CommentMode } from "./exporter/exporter.js";
@@ -25,7 +26,7 @@ let activeVerbose = false;
 program
   .command("export")
   .description("Export a complete snapshot from one or more configured roots")
-  .requiredOption(
+  .option(
     "--root <id-or-url>",
     "Notion root UUID or URL; repeat for multiple roots",
     collect,
@@ -37,6 +38,7 @@ program
     collect,
     [],
   )
+  .option("--config <path>", "JSON file containing roots and skips")
   .requiredOption("--output <path>", "empty output directory")
   .option("--cache <path>", "persistent asset cache")
   .addOption(
@@ -79,6 +81,7 @@ program
       options: CommonOptions & {
         root: string[];
         skip: string[];
+        config?: string;
         output: string;
         cache?: string;
         comments: CommentMode;
@@ -90,9 +93,12 @@ program
       activeLogFormat = options.logFormat;
       activeVerbose = options.verbose ?? false;
       const logger = createLogger(activeLogFormat, activeVerbose);
+      const config = options.config
+        ? await loadExportConfig(options.config)
+        : { roots: [], skips: [] };
       await runExport({
-        roots: options.root,
-        skips: options.skip,
+        roots: [...config.roots, ...options.root],
+        skips: [...config.skips, ...options.skip],
         output: options.output,
         ...(options.cache ? { cache: options.cache } : {}),
         comments: options.comments,

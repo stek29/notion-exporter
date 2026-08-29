@@ -50,7 +50,7 @@ export async function exportSnapshot(
     ...new Set((options.skips ?? []).map(normalizeNotionId)),
   ].sort();
   if (normalizedRoots.length === 0)
-    throw new BackupError("At least one --root is required");
+    throw new BackupError("At least one export root is required");
   for (const root of normalizedRoots) {
     if (skipped.includes(root)) {
       throw new BackupError(

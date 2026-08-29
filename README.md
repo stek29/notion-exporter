@@ -41,12 +41,30 @@ The output directory must exist and be empty, or be absent so the exporter can c
 export NOTION_TOKEN_FILE=/run/secrets/notion_token
 
 notion-backup export \
-  --root 59833787-2cf9-4fdf-8782-e53db20768a5 \
-  --root https://www.notion.so/example-248104cd477e80fdb757e945d38000bd \
+  --root 11111111-1111-1111-1111-111111111111 \
+  --root https://www.notion.so/example-22222222222222222222222222222222 \
   --skip 33333333-3333-3333-3333-333333333333 \
   --output /work/export \
   --cache /cache
 ```
+
+Roots and skips can instead be kept in a JSON file:
+
+```json
+{
+  "roots": [
+    "11111111-1111-1111-1111-111111111111",
+    "https://www.notion.so/example-22222222222222222222222222222222"
+  ],
+  "skips": ["33333333-3333-3333-3333-333333333333"]
+}
+```
+
+```bash
+notion-backup export --config export.json --output /work/export --cache /cache
+```
+
+`--root` and `--skip` may still be supplied with `--config`; their values are added to the file's lists.
 
 The token may instead be provided through `NOTION_TOKEN`. Supplying both secret sources is an error. Tokens, authorization headers and signed asset URLs are never intentionally logged.
 
