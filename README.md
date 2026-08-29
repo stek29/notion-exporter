@@ -8,6 +8,14 @@ Every export starts with an empty directory, recursively traverses all reachable
 
 The snapshot format is versioned but the project is initially released as `0.1.0`. Test restores and verification before relying on it as the only copy of important data.
 
+## Here be dragons
+
+This is AI-assisted, vibe-coded backup software. It works for me and my Notion
+workspace; it might not work for you or yours. There is no warranty, expressed
+or implied, and a green verification result is not a substitute for testing an
+actual restore. Keep another copy of anything important, inspect the output, and
+do not make this tool the only thing standing between you and data loss.
+
 ## Requirements
 
 - Node.js 24 or the OCI image
