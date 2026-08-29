@@ -26,7 +26,7 @@ export interface Counts {
 
 export interface ExportStats extends Counts {
   assets_downloaded: number;
-  assets_reused_from_cache: number;
+  assets_reused_from_previous: number;
   downloaded_bytes: number;
 }
 

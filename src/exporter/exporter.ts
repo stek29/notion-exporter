@@ -1,5 +1,5 @@
-import { mkdir, readdir, stat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { resolve, sep } from "node:path";
 import { AssetManager } from "../assets/manager.js";
 import {
   EXPORTER_VERSION,
@@ -7,6 +7,7 @@ import {
   NOTION_API_VERSION,
 } from "../constants.js";
 import type { NotionApi } from "../notion/api.js";
+import { PreviousSnapshot } from "../incremental/previous-snapshot.js";
 import { BackupError, VerificationError } from "../shared/errors.js";
 import { normalizeNotionId } from "../shared/ids.js";
 import type { Logger } from "../shared/logger.js";
@@ -21,6 +22,7 @@ import {
   normalizeSnapshotDirectories,
   SnapshotWriter,
 } from "../snapshot/writer.js";
+import { stringifyCanonical } from "../snapshot/canonical-json.js";
 import { verifySnapshot } from "../verify/verifier.js";
 import { retrieveBlockTree } from "./block-tree.js";
 import { needsIndividualPropertyRetrieval } from "./page-property.js";
@@ -29,7 +31,7 @@ export interface ExportOptions {
   roots: string[];
   skips?: string[];
   output: string;
-  cache?: string;
+  incrementalFrom?: string;
   comments?: CommentMode;
   assetConcurrency: number;
   api: NotionApi;
@@ -60,6 +62,15 @@ export async function exportSnapshot(
   }
 
   const output = resolve(options.output);
+  const previous = options.incrementalFrom
+    ? resolve(options.incrementalFrom)
+    : undefined;
+  if (previous) {
+    requireSeparateSnapshotPaths(previous, output);
+    const verification = await verifySnapshot(previous);
+    if (!verification.valid) throw new VerificationError(verification.errors);
+    options.logger.info("Previous snapshot verified", { path: previous });
+  }
   await requireEmptyDirectory(output);
   await Promise.all(
     [
@@ -76,11 +87,19 @@ export async function exportSnapshot(
   const writer = new SnapshotWriter(output);
   const assets = new AssetManager({
     writer,
-    ...(options.cache ? { cache: resolve(options.cache) } : {}),
+    ...(previous ? { previous } : {}),
     concurrency: options.assetConcurrency,
     logger: options.logger,
     ...(options.assetFetch ? { fetch: options.assetFetch } : {}),
   });
+  const reusePrevious = previous
+    ? await previousSkipsMatch(previous, skipped)
+    : false;
+  if (previous && !reusePrevious) {
+    options.logger.warn(
+      "Skip configuration changed; resource reuse disabled for safety",
+    );
+  }
   const state = new ExportState(
     options.api,
     writer,
@@ -88,6 +107,9 @@ export async function exportSnapshot(
     options.logger,
     options.comments ?? "none",
     new Set(skipped),
+    previous && reusePrevious
+      ? new PreviousSnapshot(previous, writer, assets)
+      : undefined,
   );
 
   options.logger.info("Exporting configured roots", {
@@ -138,6 +160,10 @@ class ExportState {
   private readonly comments = new Map<string, Promise<void>>();
   private readonly exportedViews = new Set<string>();
   private readonly referencedUsers = new Map<string, NotionObject[]>();
+  private readonly prefetchedPages = new Map<string, NotionObject>();
+  private readonly prefetchedDatabases = new Map<string, NotionObject>();
+  private readonly prefetchedBlockChildren = new Map<string, NotionObject[]>();
+  private readonly invalidPreviousEdges = new Set<string>();
   private userCount = 0;
 
   public constructor(
@@ -147,6 +173,7 @@ class ExportState {
     private readonly logger: Logger,
     private readonly commentMode: CommentMode,
     private readonly skipped: ReadonlySet<string>,
+    private readonly previous: PreviousSnapshot | undefined,
   ) {}
 
   public async exportRoot(id: string): Promise<void> {
@@ -180,10 +207,29 @@ class ExportState {
   public exportPage(id: string, prefetched?: NotionObject): Promise<void> {
     if (this.isSkipped(id)) return Promise.resolve();
     return this.memoize(this.pageTasks, id, async () => {
-      const page = prefetched ?? (await this.api.retrievePage(id));
+      const page =
+        prefetched ??
+        this.prefetchedPages.get(normalizeNotionId(id)) ??
+        (await this.api.retrievePage(id));
       assertObject(page, id, "page");
       this.collectUsers(page);
       this.logger.debug("Exporting page", { id });
+
+      const previousTraversal = await this.reusablePageTraversal(id, page);
+      if (previousTraversal) {
+        await this.previous?.reusePage(id, (value) => this.collectUsers(value));
+        this.logger.debug("Reused unchanged page", { id });
+        await Promise.all([
+          ...previousTraversal.childPages.map((child) =>
+            this.exportPage(child),
+          ),
+          ...previousTraversal.childDatabases.map((child) =>
+            this.exportDatabase(child),
+          ),
+        ]);
+        return;
+      }
+
       const canonicalPageDone = this.assets.canonicalize(page, `page:${id}`);
       void canonicalPageDone.catch(() => undefined);
 
@@ -230,7 +276,10 @@ class ExportState {
             );
           return canonical as NotionObject;
         },
-        (block) => !this.isSkipped(block.id),
+        (block) =>
+          !this.isSkipped(block.id) &&
+          !this.invalidPreviousEdges.has(edgeKey(id, block.id)),
+        this.prefetchedBlockChildren,
       );
       const commentIds = new Set<string>();
       const commentTasks: Promise<void>[] = [];
@@ -270,7 +319,10 @@ class ExportState {
   public exportDatabase(id: string, prefetched?: NotionObject): Promise<void> {
     if (this.isSkipped(id)) return Promise.resolve();
     return this.memoize(this.databaseTasks, id, async () => {
-      const database = prefetched ?? (await this.api.retrieveDatabase(id));
+      const database =
+        prefetched ??
+        this.prefetchedDatabases.get(normalizeNotionId(id)) ??
+        (await this.api.retrieveDatabase(id));
       assertObject(database, id, "database");
       this.logger.debug("Exporting database", { id });
 
@@ -288,12 +340,24 @@ class ExportState {
       const retainedDatabase = Array.isArray(database.data_sources)
         ? { ...database, data_sources: dataSources }
         : database;
-      this.collectUsers(retainedDatabase);
-      const canonical = await this.assets.canonicalize(
-        retainedDatabase,
-        `database:${id}`,
-      );
-      await this.writer.writeJson(`databases/${id}/database.json`, canonical);
+      const databasePath = `databases/${id}/database.json`;
+      const previous = this.previous;
+      if (
+        previous &&
+        (await previous.canReuse(databasePath, retainedDatabase))
+      ) {
+        await previous.reuseJson(databasePath, (value) =>
+          this.collectUsers(value),
+        );
+        this.logger.debug("Reused unchanged database", { id });
+      } else {
+        this.collectUsers(retainedDatabase);
+        const canonical = await this.assets.canonicalize(
+          retainedDatabase,
+          `database:${id}`,
+        );
+        await this.writer.writeJson(databasePath, canonical);
+      }
 
       const views = await this.api.listViews(id);
       await Promise.all([
@@ -323,13 +387,24 @@ class ExportState {
     return this.memoize(this.dataSourceTasks, id, async () => {
       const dataSource = prefetched ?? (await this.api.retrieveDataSource(id));
       assertObject(dataSource, id, "data_source");
-      this.collectUsers(dataSource);
       this.logger.debug("Exporting data source", { id });
-      const canonicalDone = this.assets.canonicalize(
+      const dataSourcePath = `data-sources/${id}/data-source.json`;
+      const reusable = await this.previous?.canReuse(
+        dataSourcePath,
         dataSource,
-        `data-source:${id}`,
       );
+      const canonicalDone = reusable
+        ? this.previous!.reuseJson(dataSourcePath, (value) =>
+            this.collectUsers(value),
+          )
+        : this.assets
+            .canonicalize(dataSource, `data-source:${id}`)
+            .then(async (canonical) => {
+              this.collectUsers(dataSource);
+              await this.writer.writeJson(dataSourcePath, canonical);
+            });
       void canonicalDone.catch(() => undefined);
+      if (reusable) this.logger.debug("Reused unchanged data source", { id });
       const pageIds = new Set<string>();
       const childDataSourceIds = new Set<string>();
       const rowTasks: Promise<void>[] = [];
@@ -338,18 +413,17 @@ class ExportState {
         if (this.isSkipped(rowId)) continue;
         if (row.object === "page") {
           pageIds.add(rowId);
-          rowTasks.push(this.exportPage(rowId));
+          rowTasks.push(this.exportPage(rowId, row));
         } else if (row.object === "data_source") {
           childDataSourceIds.add(rowId);
-          rowTasks.push(this.exportDataSource(rowId));
+          rowTasks.push(this.exportDataSource(rowId, row));
         } else
           throw new BackupError(
             `Data source ${id} returned unsupported row type ${row.object}`,
           );
       }
-      const canonical = await canonicalDone;
       await Promise.all([
-        this.writer.writeJson(`data-sources/${id}/data-source.json`, canonical),
+        canonicalDone,
         this.writer.writeJson(`data-sources/${id}/rows.json`, {
           pages: [...pageIds].sort(),
           data_sources: [...childDataSourceIds].sort(),
@@ -406,7 +480,7 @@ class ExportState {
       users: this.userCount,
       assets: 0,
       assets_downloaded: 0,
-      assets_reused_from_cache: 0,
+      assets_reused_from_previous: 0,
       downloaded_bytes: 0,
     };
   }
@@ -421,12 +495,16 @@ class ExportState {
         this.isSkipped(view.data_source_id)
       )
         return;
-      this.collectUsers(view);
-      const canonical = await this.assets.canonicalize(view, `view:${id}`);
-      await this.writer.writeJson(
-        `databases/${databaseId}/views/${id}.json`,
-        canonical,
-      );
+      const viewPath = `databases/${databaseId}/views/${id}.json`;
+      const previous = this.previous;
+      if (previous && (await previous.canReuse(viewPath, view))) {
+        await previous.reuseJson(viewPath, (value) => this.collectUsers(value));
+        this.logger.debug("Reused unchanged view", { id });
+      } else {
+        this.collectUsers(view);
+        const canonical = await this.assets.canonicalize(view, `view:${id}`);
+        await this.writer.writeJson(viewPath, canonical);
+      }
       this.exportedViews.add(id);
     });
   }
@@ -444,6 +522,54 @@ class ExportState {
         canonical,
       );
     });
+  }
+
+  private async reusablePageTraversal(
+    id: string,
+    page: NotionObject,
+  ): Promise<{ childPages: string[]; childDatabases: string[] } | undefined> {
+    if (!this.previous || this.commentMode !== "none") return undefined;
+    if (!(await this.previous.canReuse(`pages/${id}/page.json`, page)))
+      return undefined;
+    const [previousBlocks, currentBlocks] = await Promise.all([
+      this.previous.pageBlocks(id),
+      this.api.listBlockChildren(id),
+    ]);
+    this.prefetchedBlockChildren.set(normalizeNotionId(id), currentBlocks);
+    if (!sameBlockListing(currentBlocks, previousBlocks)) return undefined;
+    const traversal = await this.previous.pageTraversal(id);
+    for (const child of traversal.childPages) {
+      const current = await this.tryPreviousChild(() =>
+        this.api.retrievePage(child),
+      );
+      if (!current || !isCurrentChildOf(current, id)) {
+        this.invalidPreviousEdges.add(edgeKey(id, child));
+        return undefined;
+      }
+      this.prefetchedPages.set(child, current);
+    }
+    for (const child of traversal.childDatabases) {
+      const current = await this.tryPreviousChild(() =>
+        this.api.retrieveDatabase(child),
+      );
+      if (!current || !isCurrentChildOf(current, id)) {
+        this.invalidPreviousEdges.add(edgeKey(id, child));
+        return undefined;
+      }
+      this.prefetchedDatabases.set(child, current);
+    }
+    return traversal;
+  }
+
+  private async tryPreviousChild(
+    operation: () => Promise<NotionObject>,
+  ): Promise<NotionObject | undefined> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (this.api.isLookupMiss(error)) return undefined;
+      throw error;
+    }
   }
 
   private memoize(
@@ -489,6 +615,34 @@ class ExportState {
   }
 }
 
+async function previousSkipsMatch(
+  previous: string,
+  skipped: string[],
+): Promise<boolean> {
+  const roots = JSON.parse(
+    await readFile(resolve(previous, "roots.json"), "utf8"),
+  ) as unknown;
+  if (!isRecord(roots)) return false;
+  const prior = Array.isArray(roots.skipped)
+    ? roots.skipped.map((id) =>
+        typeof id === "string" ? normalizeNotionId(id) : "",
+      )
+    : [];
+  return JSON.stringify(prior.sort()) === JSON.stringify(skipped);
+}
+
+function requireSeparateSnapshotPaths(previous: string, output: string): void {
+  if (
+    previous === output ||
+    previous.startsWith(`${output}${sep}`) ||
+    output.startsWith(`${previous}${sep}`)
+  ) {
+    throw new BackupError(
+      "Previous snapshot and output directory must not overlap",
+    );
+  }
+}
+
 async function requireEmptyDirectory(path: string): Promise<void> {
   try {
     const details = await stat(path);
@@ -523,6 +677,62 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isCurrentChildOf(resource: NotionObject, parentId: string): boolean {
+  if (
+    resource.in_trash === true ||
+    resource.archived === true ||
+    resource.is_archived === true ||
+    !isRecord(resource.parent)
+  ) {
+    return false;
+  }
+  const expected = normalizeNotionId(parentId);
+  for (const key of ["page_id", "block_id"]) {
+    const value = resource.parent[key];
+    if (typeof value === "string" && normalizeNotionId(value) === expected)
+      return true;
+  }
+  return false;
+}
+
+function edgeKey(parentId: string, childId: string): string {
+  return `${normalizeNotionId(parentId)}:${normalizeNotionId(childId)}`;
+}
+
+function sameBlockListing(
+  current: NotionObject[],
+  previous: unknown[],
+): boolean {
+  if (current.length !== previous.length) return false;
+  return current.every((block, index) => {
+    const prior = previous[index];
+    if (
+      !isRecord(prior) ||
+      typeof prior.id !== "string" ||
+      typeof block.last_edited_time !== "string" ||
+      typeof prior.last_edited_time !== "string"
+    ) {
+      return false;
+    }
+    return (
+      normalizeNotionId(block.id) === normalizeNotionId(prior.id) &&
+      stringifyBlockRevision(block) === stringifyBlockRevision(prior)
+    );
+  });
+}
+
+function stringifyBlockRevision(block: Record<string, unknown>): string {
+  return stringifyCanonical({
+    object: block.object,
+    type: block.type,
+    last_edited_time: block.last_edited_time,
+    has_children: block.has_children,
+    parent: block.parent,
+    in_trash: block.in_trash,
+    archived: block.archived,
+  });
+}
+
 function formatStats(stats: ExportStats): Record<string, number> {
   return {
     pages: stats.pages,
@@ -533,7 +743,7 @@ function formatStats(stats: ExportStats): Record<string, number> {
     users: stats.users,
     assets: stats.assets,
     assets_downloaded: stats.assets_downloaded,
-    assets_reused_from_cache: stats.assets_reused_from_cache,
+    assets_reused_from_previous: stats.assets_reused_from_previous,
     downloaded_bytes: stats.downloaded_bytes,
   };
 }

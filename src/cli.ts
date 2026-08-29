@@ -40,7 +40,10 @@ program
   )
   .option("--config <path>", "JSON file containing roots and skips")
   .requiredOption("--output <path>", "empty output directory")
-  .option("--cache <path>", "persistent asset cache")
+  .option(
+    "--incremental-from <path>",
+    "reuse unchanged resources and assets from a previous snapshot",
+  )
   .addOption(
     new Option("--comments <mode>", "comment export mode")
       .choices(["none", "all"])
@@ -83,7 +86,7 @@ program
         skip: string[];
         config?: string;
         output: string;
-        cache?: string;
+        incrementalFrom?: string;
         comments: CommentMode;
         concurrency: number;
         requestsPerSecond: number;
@@ -100,7 +103,9 @@ program
         roots: [...config.roots, ...options.root],
         skips: [...config.skips, ...options.skip],
         output: options.output,
-        ...(options.cache ? { cache: options.cache } : {}),
+        ...(options.incrementalFrom
+          ? { incrementalFrom: options.incrementalFrom }
+          : {}),
         comments: options.comments,
         concurrency: options.concurrency,
         requestsPerSecond: options.requestsPerSecond,

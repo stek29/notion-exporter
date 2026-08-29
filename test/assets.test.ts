@@ -7,13 +7,11 @@ import { SnapshotWriter } from "../src/snapshot/writer.js";
 import { silentLogger } from "./helpers/mock-api.js";
 
 describe("assets", () => {
-  it("hashes assets, deduplicates content, and reuses a validated cache", async () => {
-    const cache = await mkdtemp(join(tmpdir(), "notion-cache-"));
+  it("hashes assets, deduplicates content, and reuses a previous snapshot", async () => {
     const firstOutput = await outputDirectory();
     const networkFetch = vi.fn(fetch);
     const first = new AssetManager({
       writer: new SnapshotWriter(firstOutput),
-      cache,
       concurrency: 2,
       logger: silentLogger(),
       fetch: networkFetch,
@@ -62,7 +60,7 @@ describe("assets", () => {
     });
     const second = new AssetManager({
       writer: new SnapshotWriter(secondOutput),
-      cache,
+      previous: firstOutput,
       concurrency: 1,
       logger: silentLogger(),
       fetch: noNetwork as typeof fetch,

@@ -17,13 +17,15 @@ export async function retrieveBlockTree(
   parentId: string,
   transform?: (block: NotionObject) => Promise<NotionObject>,
   include?: (block: NotionObject) => boolean,
+  prefetchedChildren?: ReadonlyMap<string, NotionObject[]>,
 ): Promise<BlockTreeResult> {
   const childPages = new Set<string>();
   const childDatabases = new Set<string>();
   const blockIds: string[] = [];
 
   const walk = async (id: string): Promise<BlockWithChildren[]> => {
-    const children = await api.listBlockChildren(id);
+    const children =
+      prefetchedChildren?.get(id) ?? (await api.listBlockChildren(id));
     return Promise.all(
       children
         .filter((block) => include?.(block) ?? true)

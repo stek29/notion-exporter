@@ -192,6 +192,126 @@ describe("exporter", () => {
     expect(await verifySnapshot(output)).toMatchObject({ valid: true });
   });
 
+  it("reuses an unchanged page from a verified previous snapshot", async () => {
+    const previous = await mkdtemp(join(tmpdir(), "notion-incremental-base-"));
+    await exportSnapshot({
+      roots: [IDS.page1],
+      output: previous,
+      assetConcurrency: 1,
+      api: fixtureApi(),
+      logger: silentLogger(),
+    });
+
+    const output = await mkdtemp(join(tmpdir(), "notion-incremental-next-"));
+    const api = fixtureApi();
+    const stats = await exportSnapshot({
+      roots: [IDS.page1],
+      output,
+      incrementalFrom: previous,
+      assetConcurrency: 1,
+      api,
+      logger: silentLogger(),
+    });
+
+    expect(api.pageRetrievals.get(IDS.page1)).toBe(1);
+    expect(api.pagePropertyRetrievals).toEqual([]);
+    expect(stats.pages).toBe(1);
+    expect(await verifySnapshot(output)).toMatchObject({ valid: true });
+  });
+
+  it("discovers a new child even when the parent timestamp did not change", async () => {
+    const previous = await mkdtemp(join(tmpdir(), "notion-new-child-base-"));
+    const original = new MockNotionApi();
+    original.pages.set(IDS.page1, page(IDS.page1));
+    await exportSnapshot({
+      roots: [IDS.page1],
+      output: previous,
+      assetConcurrency: 1,
+      api: original,
+      logger: silentLogger(),
+    });
+
+    const output = await mkdtemp(join(tmpdir(), "notion-new-child-next-"));
+    await exportSnapshot({
+      roots: [IDS.page1],
+      output,
+      incrementalFrom: previous,
+      assetConcurrency: 1,
+      api: childPageApi(IDS.page1),
+      logger: silentLogger(),
+    });
+
+    await expect(
+      readFile(join(output, "pages", IDS.page2, "page.json")),
+    ).resolves.toBeTruthy();
+    expect(await verifySnapshot(output)).toMatchObject({ valid: true });
+  });
+
+  it("recrawls an unchanged parent when a previous child moved away", async () => {
+    const previous = await mkdtemp(join(tmpdir(), "notion-moved-base-"));
+    await exportSnapshot({
+      roots: [IDS.page1],
+      output: previous,
+      assetConcurrency: 1,
+      api: childPageApi(IDS.page1),
+      logger: silentLogger(),
+    });
+
+    const output = await mkdtemp(join(tmpdir(), "notion-moved-next-"));
+    const current = childPageApi(IDS.database);
+    await exportSnapshot({
+      roots: [IDS.page1],
+      output,
+      incrementalFrom: previous,
+      assetConcurrency: 1,
+      api: current,
+      logger: silentLogger(),
+    });
+
+    await expect(
+      readFile(join(output, "pages", IDS.page2, "page.json")),
+    ).rejects.toThrow();
+    await expect(
+      readFile(join(output, "pages", IDS.page1, "blocks.json"), "utf8"),
+    ).resolves.toBe("[]\n");
+    expect(await verifySnapshot(output)).toMatchObject({ valid: true });
+  });
+
+  it("fully reconciles removed data-source rows", async () => {
+    const previous = await mkdtemp(join(tmpdir(), "notion-row-base-"));
+    await exportSnapshot({
+      roots: [IDS.database],
+      output: previous,
+      assetConcurrency: 1,
+      api: fixtureApi(),
+      logger: silentLogger(),
+    });
+
+    const output = await mkdtemp(join(tmpdir(), "notion-row-next-"));
+    const current = fixtureApi();
+    current.rows.set(IDS.dataSource, [current.pages.get(IDS.page1)!]);
+    await exportSnapshot({
+      roots: [IDS.database],
+      output,
+      incrementalFrom: previous,
+      assetConcurrency: 1,
+      api: current,
+      logger: silentLogger(),
+    });
+
+    await expect(
+      readFile(join(output, "pages", IDS.page2, "page.json")),
+    ).rejects.toThrow();
+    const rows = JSON.parse(
+      await readFile(
+        join(output, "data-sources", IDS.dataSource, "rows.json"),
+        "utf8",
+      ),
+    ) as { pages: string[] };
+    expect(rows.pages).toEqual([IDS.page1]);
+    expect(await verifySnapshot(output)).toMatchObject({ valid: true });
+  });
+
   it("produces byte-identical deterministic files across unchanged exports", async () => {
     const first = await mkdtemp(join(tmpdir(), "notion-determinism-a-"));
     const second = await mkdtemp(join(tmpdir(), "notion-determinism-b-"));
@@ -222,6 +342,28 @@ async function snapshotFiles(root: string): Promise<Map<string, Buffer>> {
       files.set(path, await readFile(join(root, path)));
   }
   return files;
+}
+
+function childPageApi(childParent: string): MockNotionApi {
+  const api = new MockNotionApi();
+  api.pages.set(IDS.page1, page(IDS.page1));
+  api.pages.set(IDS.page2, {
+    ...page(IDS.page2),
+    parent: { type: "page_id", page_id: childParent },
+  });
+  api.blocks.set(IDS.page1, [
+    {
+      object: "block",
+      id: IDS.page2,
+      type: "child_page",
+      has_children: false,
+      created_time: "2026-01-01T00:00:00.000Z",
+      last_edited_time: "2026-01-01T00:00:00.000Z",
+      parent: { type: "page_id", page_id: IDS.page1 },
+      child_page: { title: "Synthetic child" },
+    },
+  ]);
+  return api;
 }
 
 function fixtureApi(): MockNotionApi {

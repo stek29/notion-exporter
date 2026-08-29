@@ -4,7 +4,6 @@ import {
   chmod,
   copyFile,
   mkdir,
-  open,
   readFile,
   rename,
   rmdir,
@@ -20,17 +19,16 @@ import { BackupError } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import { Semaphore } from "../shared/semaphore.js";
 import type { ExportStats, JsonObject, JsonValue } from "../shared/types.js";
-import { stringifyCanonical } from "../snapshot/canonical-json.js";
 import { SnapshotWriter } from "../snapshot/writer.js";
 
-interface CacheEntry {
+interface AssetIndexEntry {
   sha256: string;
   size: number;
   content_type?: string;
   filename?: string;
 }
 
-interface AssetRecord extends CacheEntry {
+interface AssetRecord extends AssetIndexEntry {
   path: string;
 }
 
@@ -43,7 +41,7 @@ interface AssetMetadata {
 
 export interface AssetManagerOptions {
   writer: SnapshotWriter;
-  cache?: string;
+  previous?: string;
   concurrency: number;
   logger: Logger;
   fetch?: typeof globalThis.fetch;
@@ -54,10 +52,11 @@ export class AssetManager {
   private readonly fetch: typeof globalThis.fetch;
   private readonly byLocator = new Map<string, Promise<AssetRecord>>();
   private readonly metadata = new Map<string, AssetMetadata>();
-  private readonly cacheIndex = new Map<string, CacheEntry>();
-  private cacheLoaded = false;
+  private readonly assetIndex = new Map<string, AssetIndexEntry>();
+  private readonly importedAssets = new Map<string, Promise<void>>();
+  private readonly reusedAssetHashes = new Set<string>();
+  private indexLoaded = false;
   private downloaded = 0;
-  private reused = 0;
   private downloadedBytes = 0;
 
   public constructor(private readonly options: AssetManagerOptions) {
@@ -154,6 +153,13 @@ export class AssetManager {
     return Object.fromEntries(entries) as JsonObject;
   }
 
+  public async reuseCanonical(value: unknown): Promise<void> {
+    if (!this.options.previous)
+      throw new BackupError("Previous snapshot is required for asset reuse");
+    await this.loadPreviousIndex();
+    await this.scanPreviousAssets(value);
+  }
+
   public async finalize(): Promise<void> {
     for (const [hash, metadata] of [...this.metadata].sort(([a], [b]) =>
       a.localeCompare(b),
@@ -168,28 +174,25 @@ export class AssetManager {
         },
       );
     }
-    if (this.options.cache) {
-      const index = Object.fromEntries(
-        [...this.cacheIndex].sort(([a], [b]) => a.localeCompare(b)),
-      );
-      await atomicWrite(
-        join(this.options.cache, "index.json"),
-        stringifyCanonical(index),
-      );
-    }
+    const index = Object.fromEntries(
+      [...this.assetIndex]
+        .filter(([, entry]) => this.metadata.has(entry.sha256))
+        .sort(([a], [b]) => a.localeCompare(b)),
+    );
+    await this.options.writer.writeJson("assets/index.json", index);
     await rmdir(this.options.writer.path(".asset-tmp")).catch(() => undefined);
   }
 
   public applyStats(stats: ExportStats): void {
     stats.assets = this.metadata.size;
     stats.assets_downloaded = this.downloaded;
-    stats.assets_reused_from_cache = this.reused;
+    stats.assets_reused_from_previous = this.reusedAssetHashes.size;
     stats.downloaded_bytes = this.downloadedBytes;
   }
 
   private async store(url: string, filename?: string): Promise<AssetRecord> {
-    await this.loadCache();
-    const locator = stableLocator(url);
+    await this.loadPreviousIndex();
+    const locator = stableLocatorKey(url);
     let pending = this.byLocator.get(locator);
     if (!pending) {
       pending = this.semaphore.run(() => this.obtain(url, locator, filename));
@@ -214,22 +217,25 @@ export class AssetManager {
     locator: string,
     filename?: string,
   ): Promise<AssetRecord> {
-    const cached = this.cacheIndex.get(locator);
-    if (cached && this.options.cache) {
-      const cachePath = cacheAssetPath(this.options.cache, cached.sha256);
-      if (await validateHash(cachePath, cached.sha256, cached.size)) {
-        const selectedFilename = filename ?? cached.filename;
-        const record = await this.copyToSnapshot(cachePath, {
-          ...cached,
+    const previous = this.assetIndex.get(locator);
+    if (previous && this.options.previous) {
+      const previousPath = join(
+        this.options.previous,
+        assetRelativePath(previous.sha256),
+      );
+      if (await validateHash(previousPath, previous.sha256, previous.size)) {
+        const selectedFilename = filename ?? previous.filename;
+        const record = await this.copyToSnapshot(previousPath, {
+          ...previous,
           ...(selectedFilename ? { filename: selectedFilename } : {}),
         });
-        this.reused += 1;
+        this.reusedAssetHashes.add(previous.sha256);
         return record;
       }
-      this.options.logger.warn("Ignoring corrupt asset cache entry", {
-        sha256: cached.sha256,
+      this.options.logger.warn("Ignoring unusable previous asset entry", {
+        sha256: previous.sha256,
       });
-      this.cacheIndex.delete(locator);
+      this.assetIndex.delete(locator);
     }
 
     const downloaded = await this.download(url, filename);
@@ -239,27 +245,20 @@ export class AssetManager {
     );
     this.downloaded += 1;
     this.downloadedBytes += downloaded.size;
-    const cacheEntry: CacheEntry = {
+    const indexEntry: AssetIndexEntry = {
       sha256: record.sha256,
       size: record.size,
       ...(record.content_type ? { content_type: record.content_type } : {}),
       ...(record.filename ? { filename: record.filename } : {}),
     };
-    this.cacheIndex.set(locator, cacheEntry);
-    if (this.options.cache) {
-      const cachePath = cacheAssetPath(this.options.cache, record.sha256);
-      await mkdir(dirname(cachePath), { recursive: true });
-      if (!(await validateHash(cachePath, record.sha256, record.size))) {
-        await copyEfficient(this.options.writer.path(record.path), cachePath);
-      }
-    }
+    this.assetIndex.set(locator, indexEntry);
     return record;
   }
 
   private async download(
     url: string,
     filename?: string,
-  ): Promise<CacheEntry & { temporary: string }> {
+  ): Promise<AssetIndexEntry & { temporary: string }> {
     const temporaryDirectory = this.options.writer.path(".asset-tmp");
     await mkdir(temporaryDirectory, { recursive: true });
     let lastError: unknown;
@@ -319,7 +318,7 @@ export class AssetManager {
 
   private async moveIntoSnapshot(
     temporary: string,
-    entry: CacheEntry,
+    entry: AssetIndexEntry,
   ): Promise<AssetRecord> {
     const relative = assetRelativePath(entry.sha256);
     const destination = this.options.writer.path(relative);
@@ -335,7 +334,7 @@ export class AssetManager {
 
   private async copyToSnapshot(
     source: string,
-    entry: CacheEntry,
+    entry: AssetIndexEntry,
   ): Promise<AssetRecord> {
     const relative = assetRelativePath(entry.sha256);
     const destination = this.options.writer.path(relative);
@@ -345,16 +344,19 @@ export class AssetManager {
     return { ...entry, path: relative };
   }
 
-  private async loadCache(): Promise<void> {
-    if (this.cacheLoaded) return;
-    this.cacheLoaded = true;
-    if (!this.options.cache) return;
-    await mkdir(this.options.cache, { recursive: true });
+  private async loadPreviousIndex(): Promise<void> {
+    if (this.indexLoaded) return;
+    this.indexLoaded = true;
+    if (!this.options.previous) return;
     try {
       const parsed = JSON.parse(
-        await readFile(join(this.options.cache, "index.json"), "utf8"),
+        await readFile(
+          join(this.options.previous, "assets/index.json"),
+          "utf8",
+        ),
       ) as unknown;
-      if (!isRecord(parsed)) throw new Error("cache index is not an object");
+      if (!isRecord(parsed))
+        throw new Error("previous asset index is not an object");
       for (const [locator, value] of Object.entries(parsed)) {
         if (
           isRecord(value) &&
@@ -362,23 +364,100 @@ export class AssetManager {
           /^[a-f0-9]{64}$/.test(value.sha256) &&
           typeof value.size === "number"
         ) {
-          this.cacheIndex.set(locator, value as unknown as CacheEntry);
+          this.assetIndex.set(locator, value as unknown as AssetIndexEntry);
         }
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        this.options.logger.warn("Ignoring unreadable asset cache index");
+        this.options.logger.warn("Ignoring unreadable previous asset index");
       }
     }
+  }
+
+  private async scanPreviousAssets(value: unknown): Promise<void> {
+    if (Array.isArray(value)) {
+      await Promise.all(value.map((child) => this.scanPreviousAssets(child)));
+      return;
+    }
+    if (!isRecord(value)) return;
+    if (isRecord(value.backup_asset)) {
+      const asset = value.backup_asset;
+      if (
+        typeof asset.sha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(asset.sha256) ||
+        asset.path !== assetRelativePath(asset.sha256)
+      ) {
+        throw new BackupError(
+          "Previous snapshot has a malformed asset reference",
+        );
+      }
+      let pending = this.importedAssets.get(asset.sha256);
+      if (!pending) {
+        pending = this.importPreviousAsset(asset.sha256);
+        this.importedAssets.set(asset.sha256, pending);
+      }
+      await pending;
+    }
+    await Promise.all(
+      Object.values(value).map((child) => this.scanPreviousAssets(child)),
+    );
+  }
+
+  private async importPreviousAsset(hash: string): Promise<void> {
+    if (!this.options.previous)
+      throw new BackupError("Previous snapshot is required for asset reuse");
+    const metadataPath = join(
+      this.options.previous,
+      `assets/metadata/${hash.slice(0, 2)}/${hash}.json`,
+    );
+    let metadataValue: unknown;
+    try {
+      metadataValue = JSON.parse(await readFile(metadataPath, "utf8"));
+    } catch (error) {
+      throw new BackupError(
+        `Could not read metadata for previous asset ${hash}`,
+        {
+          cause: error,
+        },
+      );
+    }
+    if (
+      !isRecord(metadataValue) ||
+      metadataValue.sha256 !== hash ||
+      typeof metadataValue.size !== "number" ||
+      !Array.isArray(metadataValue.content_types) ||
+      !metadataValue.content_types.every(
+        (value) => typeof value === "string",
+      ) ||
+      !Array.isArray(metadataValue.filenames) ||
+      !metadataValue.filenames.every((value) => typeof value === "string")
+    ) {
+      throw new BackupError(`Previous asset metadata is malformed: ${hash}`);
+    }
+    const source = join(this.options.previous, assetRelativePath(hash));
+    if (!(await validateHash(source, hash, metadataValue.size)))
+      throw new BackupError(`Previous asset is missing or corrupt: ${hash}`);
+    await this.copyToSnapshot(source, {
+      sha256: hash,
+      size: metadataValue.size,
+    });
+    const metadata = this.metadata.get(hash) ?? {
+      sha256: hash,
+      size: metadataValue.size,
+      content_types: new Set<string>(),
+      filenames: new Set<string>(),
+    };
+    for (const contentType of metadataValue.content_types)
+      metadata.content_types.add(contentType as string);
+    for (const filename of metadataValue.filenames)
+      metadata.filenames.add(filename as string);
+    this.metadata.set(hash, metadata);
+    this.reusedAssetHashes.add(hash);
   }
 }
 
 function assetRelativePath(hash: string): string {
   return `assets/sha256/${hash.slice(0, 2)}/${hash}`;
-}
-
-function cacheAssetPath(cache: string, hash: string): string {
-  return join(cache, "sha256", hash.slice(0, 2), hash);
 }
 
 async function validateHash(
@@ -418,29 +497,12 @@ async function normalizeSnapshotAsset(path: string): Promise<void> {
   await utimes(path, DETERMINISTIC_MTIME, DETERMINISTIC_MTIME);
 }
 
-async function atomicWrite(
-  destination: string,
-  contents: string,
-): Promise<void> {
-  await mkdir(dirname(destination), { recursive: true });
-  const temporary = `${destination}.tmp-${randomUUID()}`;
-  const handle = await open(temporary, "wx", 0o600);
-  try {
-    await handle.writeFile(contents);
-    await handle.sync();
-    await handle.close();
-    await rename(temporary, destination);
-  } catch (error) {
-    await handle.close().catch(() => undefined);
-    await unlink(temporary).catch(() => undefined);
-    throw error;
-  }
-}
-
-function stableLocator(rawUrl: string): string {
+function stableLocatorKey(rawUrl: string): string {
   try {
     const url = new URL(rawUrl);
-    return `${url.origin}${url.pathname}`;
+    return createHash("sha256")
+      .update(`${url.origin}${url.pathname}`)
+      .digest("hex");
   } catch {
     throw new BackupError("Notion returned a malformed hosted asset URL");
   }

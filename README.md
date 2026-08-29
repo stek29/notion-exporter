@@ -44,8 +44,7 @@ notion-backup export \
   --root 11111111-1111-1111-1111-111111111111 \
   --root https://www.notion.so/example-22222222222222222222222222222222 \
   --skip 33333333-3333-3333-3333-333333333333 \
-  --output /work/export \
-  --cache /cache
+  --output /work/export
 ```
 
 Roots and skips can instead be kept in a JSON file:
@@ -61,7 +60,7 @@ Roots and skips can instead be kept in a JSON file:
 ```
 
 ```bash
-notion-backup export --config export.json --output /work/export --cache /cache
+notion-backup export --config export.json --output /work/export
 ```
 
 `--root` and `--skip` may still be supplied with `--config`; their values are added to the file's lists.
@@ -80,6 +79,21 @@ notion-backup export \
 ```
 
 Only one exporter should use a given Notion integration token at a time because Notion rate limits apply per connection.
+
+## Incremental export
+
+Pass a previous complete snapshot to reuse unchanged resource JSON and downloaded assets while still producing a standalone snapshot in a new empty output directory:
+
+```bash
+notion-backup export \
+  --config export.json \
+  --incremental-from /backups/previous \
+  --output /backups/current
+```
+
+The previous snapshot is verified before any output is written. Incremental mode checks each nested page independently, compares current top-level block membership, probes previously linked child pages and databases, and fully enumerates every data source to reconcile row membership. Missing, moved, trashed or uncertain resources force a fresh crawl rather than reuse. A moved resource remains in the new snapshot only when it is reachable through another current root or parent.
+
+Resource reuse requires matching edit timestamps and structural fields. If timestamps are absent, comments are enabled, or the skip list changed, the affected resources are exported normally. Assets are reused directly from the previous snapshot through its internal hashed asset index; there is no separate external asset cache.
 
 ## Verify
 
@@ -101,11 +115,9 @@ docker run --rm \
   -e NOTION_TOKEN_FILE=/run/secrets/notion_token \
   -v "$PWD/notion-token:/run/secrets/notion_token:ro" \
   -v "$PWD/export:/work/export" \
-  -v "$PWD/cache:/cache" \
   notion-backup export \
   --root ... \
-  --output /work/export \
-  --cache /cache
+  --output /work/export
 ```
 
 The image is one-shot, runs as a non-root user by default, and contains no scheduler or restic installation.
@@ -116,7 +128,7 @@ The image is one-shot, runs as a non-root user by default, and contains no sched
 rm -rf /work/export
 mkdir -p /work/export
 
-notion-backup export --root ... --output /work/export --cache /cache
+notion-backup export --root ... --output /work/export
 restic backup /work/export --tag notion
 
 rm -rf /work/export
@@ -138,6 +150,7 @@ databases/<database-id>/views/<view-id>.json
 data-sources/<data-source-id>/{data-source,rows}.json
 assets/sha256/<prefix>/<sha256>
 assets/metadata/<prefix>/<sha256>.json
+assets/index.json
 ```
 
 All canonical resource filenames use normalized Notion UUIDs. Resource JSON is deterministically serialized. Volatile Notion-hosted signed URLs are replaced by stable `backup_asset` references.
@@ -149,6 +162,7 @@ All canonical resource filenames use normalized Notion UUIDs. Resource JSON is d
 - Views are exported only with their owning retained database. To exclude a database even when reachable elsewhere, skip its database ID explicitly.
 - Relations are preserved as UUID references but do not implicitly expand backup scope.
 - Page properties that are complete in the Page response are persisted directly; the dedicated property endpoint is reserved for potentially truncated values and rollups.
+- Incremental exports always reconcile current reachability into a new empty snapshot; the previous snapshot is never modified in place.
 - Comments are skipped by default. Pass `--comments all` for an exhaustive, slower per-page and per-block comment scan.
 - External URLs are not mirrored.
 - Notion search is not used as authoritative enumeration.

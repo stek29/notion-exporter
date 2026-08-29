@@ -7,7 +7,7 @@ export interface ExportCommandOptions {
   roots: string[];
   skips: string[];
   output: string;
-  cache?: string;
+  incrementalFrom?: string;
   comments: CommentMode;
   concurrency: number;
   requestsPerSecond: number;
@@ -35,7 +35,9 @@ export async function runExport(options: ExportCommandOptions): Promise<void> {
     roots: options.roots,
     skips: options.skips,
     output: options.output,
-    ...(options.cache ? { cache: options.cache } : {}),
+    ...(options.incrementalFrom
+      ? { incrementalFrom: options.incrementalFrom }
+      : {}),
     comments: options.comments,
     assetConcurrency: options.assetConcurrency,
     api,
