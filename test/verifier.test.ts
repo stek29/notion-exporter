@@ -8,6 +8,32 @@ import { verifySnapshot } from "../src/verify/verifier.js";
 import { IDS, MockNotionApi, page, silentLogger } from "./helpers/mock-api.js";
 
 describe("offline verifier", () => {
+  it("emits a time-free manifest and accepts legacy format 1 snapshots", async () => {
+    const output = await mkdtemp(join(tmpdir(), "notion-manifest-"));
+    const api = new MockNotionApi();
+    api.pages.set(IDS.page1, page(IDS.page1));
+    await exportSnapshot({
+      roots: [IDS.page1],
+      output,
+      assetConcurrency: 1,
+      api,
+      logger: silentLogger(),
+    });
+
+    const manifestPath = join(output, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      format_version: number;
+      exported_at?: string;
+    };
+    expect(manifest.format_version).toBe(2);
+    expect(manifest.exported_at).toBeUndefined();
+
+    manifest.format_version = 1;
+    manifest.exported_at = "2026-01-01T00:00:00.000Z";
+    await writeFile(manifestPath, stringifyCanonical(manifest));
+    expect(await verifySnapshot(output)).toMatchObject({ valid: true });
+  });
+
   it("detects count tampering and broken internal references", async () => {
     const output = await mkdtemp(join(tmpdir(), "notion-verify-"));
     const api = new MockNotionApi();

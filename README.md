@@ -153,7 +153,7 @@ assets/metadata/<prefix>/<sha256>.json
 assets/index.json
 ```
 
-All canonical resource filenames use normalized Notion UUIDs. Resource JSON is deterministically serialized. Volatile Notion-hosted signed URLs are replaced by stable `backup_asset` references.
+All canonical resource filenames use normalized Notion UUIDs. Resource JSON is deterministically serialized. The manifest intentionally contains no export timestamp. Volatile `request_id` fields are discarded, and hosted files plus user avatars are replaced by stable `backup_asset` references.
 
 ## Scope and limits
 
@@ -164,7 +164,7 @@ All canonical resource filenames use normalized Notion UUIDs. Resource JSON is d
 - Page properties that are complete in the Page response are persisted directly; the dedicated property endpoint is reserved for potentially truncated values and rollups.
 - Incremental exports always reconcile current reachability into a new empty snapshot; the previous snapshot is never modified in place.
 - Comments are skipped by default. Pass `--comments all` for an exhaustive, slower per-page and per-block comment scan.
-- External URLs are not mirrored.
+- External content URLs are not mirrored, except user avatars.
 - Notion search is not used as authoritative enumeration.
 - The SDK's full data-source iterator partitions query windows beyond Notion's normal 10,000-result boundary. An unpartitionable boundary fails the export.
 - The tool does not implement incremental sync, restoration, Markdown export, scheduling, retention or restic invocation.

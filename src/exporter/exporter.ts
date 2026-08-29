@@ -36,7 +36,6 @@ export interface ExportOptions {
   assetConcurrency: number;
   api: NotionApi;
   logger: Logger;
-  now?: () => Date;
   assetFetch?: typeof globalThis.fetch;
 }
 
@@ -93,11 +92,12 @@ export async function exportSnapshot(
     ...(options.assetFetch ? { fetch: options.assetFetch } : {}),
   });
   const reusePrevious = previous
-    ? await previousSkipsMatch(previous, skipped)
+    ? (await previousFormatMatches(previous)) &&
+      (await previousSkipsMatch(previous, skipped))
     : false;
   if (previous && !reusePrevious) {
     options.logger.warn(
-      "Skip configuration changed; resource reuse disabled for safety",
+      "Previous format or skip configuration differs; resource reuse disabled for safety",
     );
   }
   const state = new ExportState(
@@ -129,7 +129,6 @@ export async function exportSnapshot(
     format_version: FORMAT_VERSION,
     exporter_version: EXPORTER_VERSION,
     notion_api_version: NOTION_API_VERSION,
-    exported_at: (options.now ?? (() => new Date()))().toISOString(),
     roots,
     skipped,
     counts: {
@@ -142,7 +141,7 @@ export async function exportSnapshot(
       assets: stats.assets,
     },
   };
-  await writer.writeJson("manifest.json", manifest, false);
+  await writer.writeJson("manifest.json", manifest);
   await normalizeSnapshotDirectories(output);
 
   const verification = await verifySnapshot(output);
@@ -629,6 +628,13 @@ async function previousSkipsMatch(
       )
     : [];
   return JSON.stringify(prior.sort()) === JSON.stringify(skipped);
+}
+
+async function previousFormatMatches(previous: string): Promise<boolean> {
+  const manifest = JSON.parse(
+    await readFile(resolve(previous, "manifest.json"), "utf8"),
+  ) as unknown;
+  return isRecord(manifest) && manifest.format_version === FORMAT_VERSION;
 }
 
 function requireSeparateSnapshotPaths(previous: string, output: string): void {

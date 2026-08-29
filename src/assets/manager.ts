@@ -134,13 +134,9 @@ export class AssetManager {
 
     const entries = await Promise.all(
       Object.entries(record)
-        .filter(([, child]) => child !== undefined)
+        .filter(([key, child]) => key !== "request_id" && child !== undefined)
         .map(async ([key, child]) => {
-          if (
-            key === "avatar_url" &&
-            typeof child === "string" &&
-            isNotionHostedUrl(child)
-          ) {
+          if (key === "avatar_url" && typeof child === "string") {
             const asset = await this.store(child, inferFilename(record, child));
             return [key, { backup_asset: asset }] as const;
           }
@@ -518,21 +514,6 @@ function inferFilename(
     return name && extname(name) ? name : undefined;
   } catch {
     return undefined;
-  }
-}
-
-function isNotionHostedUrl(rawUrl: string): boolean {
-  try {
-    const parsed = new URL(rawUrl);
-    const host = parsed.hostname.toLowerCase();
-    const path = parsed.pathname.toLowerCase();
-    return (
-      host.endsWith("notion-static.com") ||
-      host.endsWith("notionusercontent.com") ||
-      (host.endsWith("amazonaws.com") && path.includes("notion-static.com"))
-    );
-  } catch {
-    return false;
   }
 }
 

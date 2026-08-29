@@ -52,6 +52,26 @@ describe("assets", () => {
     expect(emoji.custom_emoji.backup_asset.sha256).toBe(
       canonical[0]?.file.backup_asset.sha256,
     );
+
+    const user = (await first.canonicalize(
+      {
+        object: "user",
+        id: "99999999-9999-9999-9999-999999999999",
+        avatar_url: "data:text/plain;base64,aGVsbG8=",
+        request_id: "volatile-top-level",
+        nested: { request_id: "volatile-nested" },
+      },
+      "user",
+    )) as {
+      avatar_url: { backup_asset: { sha256: string } };
+      request_id?: string;
+      nested: { request_id?: string };
+    };
+    expect(user.avatar_url.backup_asset.sha256).toBe(
+      canonical[0]?.file.backup_asset.sha256,
+    );
+    expect(user.request_id).toBeUndefined();
+    expect(user.nested.request_id).toBeUndefined();
     await first.finalize();
 
     const secondOutput = await outputDirectory();

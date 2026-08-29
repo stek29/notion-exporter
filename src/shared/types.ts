@@ -34,7 +34,7 @@ export interface Manifest {
   format_version: number;
   exporter_version: string;
   notion_api_version: string;
-  exported_at: string;
+  exported_at?: string;
   roots: RootRecord[];
   skipped?: string[];
   counts: Counts;

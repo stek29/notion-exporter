@@ -42,7 +42,10 @@ export async function verifySnapshot(
     errors.push("manifest.json has an invalid shape");
     return invalid(errors);
   }
-  if (manifest.format_version !== FORMAT_VERSION) {
+  if (
+    manifest.format_version !== 1 &&
+    manifest.format_version !== FORMAT_VERSION
+  ) {
     errors.push(`Unsupported format_version: ${manifest.format_version}`);
   }
 
@@ -662,9 +665,14 @@ function isManifest(value: unknown): value is Manifest {
     typeof value.format_version !== "number" ||
     typeof value.exporter_version !== "string" ||
     typeof value.notion_api_version !== "string" ||
-    typeof value.exported_at !== "string" ||
     !Array.isArray(value.roots) ||
     !isRecord(value.counts)
+  ) {
+    return false;
+  }
+  if (
+    (value.format_version === 1 && typeof value.exported_at !== "string") ||
+    (value.format_version !== 1 && value.exported_at !== undefined)
   ) {
     return false;
   }

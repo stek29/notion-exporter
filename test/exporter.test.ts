@@ -17,7 +17,6 @@ describe("exporter", () => {
       assetConcurrency: 2,
       api,
       logger: silentLogger(),
-      now: () => new Date("2026-08-29T00:00:00.000Z"),
     });
 
     expect(stats).toMatchObject({
@@ -328,8 +327,7 @@ describe("exporter", () => {
     const secondFiles = await snapshotFiles(second);
     expect([...firstFiles.keys()]).toEqual([...secondFiles.keys()]);
     for (const [path, contents] of firstFiles) {
-      if (path !== "manifest.json")
-        expect(secondFiles.get(path)).toEqual(contents);
+      expect(secondFiles.get(path)).toEqual(contents);
     }
   });
 });
