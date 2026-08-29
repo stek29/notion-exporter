@@ -2,6 +2,7 @@ import type { NotionApi } from "../../src/notion/api.js";
 import type { NotionObject } from "../../src/shared/types.js";
 
 export class NotFoundError extends Error {}
+export class TypeMismatchError extends Error {}
 
 export class MockNotionApi implements NotionApi {
   public readonly pages = new Map<string, NotionObject>();
@@ -18,6 +19,8 @@ export class MockNotionApi implements NotionApi {
 
   public async retrievePage(id: string): Promise<NotionObject> {
     this.pageRetrievals.set(id, (this.pageRetrievals.get(id) ?? 0) + 1);
+    if (!this.pages.has(id) && this.databases.has(id))
+      throw new TypeMismatchError(id);
     return required(this.pages, id);
   }
 
@@ -73,6 +76,10 @@ export class MockNotionApi implements NotionApi {
 
   public isNotFound(error: unknown): boolean {
     return error instanceof NotFoundError;
+  }
+
+  public isLookupMiss(error: unknown): boolean {
+    return error instanceof NotFoundError || error instanceof TypeMismatchError;
   }
 }
 

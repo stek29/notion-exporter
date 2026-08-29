@@ -7,7 +7,7 @@ import { verifySnapshot } from "../src/verify/verifier.js";
 import { IDS, MockNotionApi, page, silentLogger } from "./helpers/mock-api.js";
 
 describe("exporter", () => {
-  it("exports and verifies a deduplicated modern resource graph", async () => {
+  it("resolves a database root after a page type mismatch and exports a deduplicated graph", async () => {
     const output = await mkdtemp(join(tmpdir(), "notion-backup-test-"));
     const api = fixtureApi();
     const stats = await exportSnapshot({

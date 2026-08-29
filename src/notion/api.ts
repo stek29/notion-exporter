@@ -37,6 +37,7 @@ export interface NotionApi {
   retrieveView(viewId: string): Promise<NotionObject>;
   iterateAllDataSourceRows(dataSourceId: string): AsyncIterable<NotionObject>;
   isNotFound(error: unknown): boolean;
+  isLookupMiss(error: unknown): boolean;
 }
 
 export interface CreateNotionApiOptions {
@@ -50,6 +51,9 @@ export function createNotionApi(options: CreateNotionApiOptions): NotionApi {
   const client = new Client({
     auth: options.token,
     notionVersion: NOTION_API_VERSION,
+    // The fetch wrapper owns per-attempt timeouts and retries. This outer limit
+    // also includes time spent waiting in the global rate-limit queue.
+    timeoutMs: 15 * 60_000,
     fetch: createRateLimitedFetch({
       requestsPerSecond: options.requestsPerSecond,
       concurrency: options.concurrency,
@@ -202,6 +206,14 @@ class SdkNotionApi implements NotionApi {
   public isNotFound(error: unknown): boolean {
     return (
       isNotionClientError(error) && error.code === APIErrorCode.ObjectNotFound
+    );
+  }
+
+  public isLookupMiss(error: unknown): boolean {
+    return (
+      this.isNotFound(error) ||
+      (isNotionClientError(error) &&
+        error.code === APIErrorCode.ValidationError)
     );
   }
 

@@ -397,7 +397,7 @@ class ExportState {
     try {
       return await operation();
     } catch (error) {
-      if (this.api.isNotFound(error)) return undefined;
+      if (this.api.isLookupMiss(error)) return undefined;
       throw error;
     }
   }

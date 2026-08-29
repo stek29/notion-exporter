@@ -31,4 +31,46 @@ describe("recursive blocks", () => {
     expect(result.blocks[1]?.children).toEqual([]);
     expect(result.childPages).toEqual([IDS.view]);
   });
+
+  it("stops recursion at child page and database ownership boundaries", async () => {
+    const api = new MockNotionApi();
+    api.blocks.set(IDS.page1, [
+      {
+        object: "block",
+        id: IDS.page2,
+        type: "child_page",
+        has_children: true,
+      },
+      {
+        object: "block",
+        id: IDS.database,
+        type: "child_database",
+        has_children: true,
+      },
+    ]);
+    api.blocks.set(IDS.page2, [
+      {
+        object: "block",
+        id: IDS.view,
+        type: "paragraph",
+        has_children: false,
+      },
+    ]);
+    api.blocks.set(IDS.database, [
+      {
+        object: "block",
+        id: IDS.dataSource,
+        type: "paragraph",
+        has_children: false,
+      },
+    ]);
+
+    const result = await retrieveBlockTree(api, IDS.page1);
+
+    expect(result.blocks[0]?.children).toEqual([]);
+    expect(result.blocks[1]?.children).toEqual([]);
+    expect(result.childPages).toEqual([IDS.page2]);
+    expect(result.childDatabases).toEqual([IDS.database]);
+    expect(result.blockIds).toEqual([IDS.page2, IDS.database]);
+  });
 });

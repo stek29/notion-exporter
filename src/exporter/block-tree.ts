@@ -26,12 +26,19 @@ export async function retrieveBlockTree(
     return Promise.all(
       children.map(async (block) => {
         blockIds.push(block.id);
-        if (block.object === "page" || block.type === "child_page")
-          childPages.add(block.id);
-        if (block.object === "database" || block.type === "child_database")
-          childDatabases.add(block.id);
+        const isChildPage =
+          block.object === "page" || block.type === "child_page";
+        const isChildDatabase =
+          block.object === "database" || block.type === "child_database";
+        if (isChildPage) childPages.add(block.id);
+        if (isChildDatabase) childDatabases.add(block.id);
         const transformed = transform ? await transform(block) : block;
-        const nested = block.has_children === true ? await walk(block.id) : [];
+        // A child page/database is a traversal edge, not an ordinary nested block.
+        // Its content is exported canonically under its own resource directory.
+        const nested =
+          block.has_children === true && !isChildPage && !isChildDatabase
+            ? await walk(block.id)
+            : [];
         return { ...transformed, children: nested };
       }),
     );

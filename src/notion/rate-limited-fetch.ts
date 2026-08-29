@@ -5,6 +5,8 @@ export interface RateLimitOptions {
   concurrency: number;
   logger: Logger;
   fetch?: typeof globalThis.fetch;
+  requestTimeoutMs?: number;
+  progressEvery?: number;
 }
 
 export function createRateLimitedFetch(
@@ -15,6 +17,13 @@ export function createRateLimitedFetch(
     options.concurrency,
   );
   const underlying = options.fetch ?? globalThis.fetch;
+  const requestTimeoutMs = options.requestTimeoutMs ?? 120_000;
+  const progressEvery = options.progressEvery ?? 100;
+  let requestsCompleted = 0;
+  if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs <= 0)
+    throw new RangeError("requestTimeoutMs must be positive");
+  if (!Number.isInteger(progressEvery) || progressEvery <= 0)
+    throw new RangeError("progressEvery must be a positive integer");
 
   return async (
     input: RequestInfo | URL,
@@ -23,9 +32,24 @@ export function createRateLimitedFetch(
     let lastError: unknown;
     for (let attempt = 0; attempt < 6; attempt += 1) {
       try {
-        const response = await scheduler.run(() => underlying(input, init));
-        if (!isRetryableStatus(response.status) || attempt === 5)
+        const response = await scheduler.run(() => {
+          // Start the timeout only after this request owns a scheduler slot;
+          // time spent waiting behind the global limiter is not network time.
+          const attemptTimeout = AbortSignal.timeout(requestTimeoutMs);
+          const signal = init?.signal
+            ? AbortSignal.any([init.signal, attemptTimeout])
+            : attemptTimeout;
+          return underlying(input, { ...init, signal });
+        });
+        if (!isRetryableStatus(response.status) || attempt === 5) {
+          requestsCompleted += 1;
+          if (requestsCompleted % progressEvery === 0) {
+            options.logger.info("Notion API progress", {
+              requests_completed: requestsCompleted,
+            });
+          }
           return response;
+        }
         await response.body?.cancel().catch(() => undefined);
 
         const retryAfter = parseRetryAfter(response.headers.get("retry-after"));
@@ -45,6 +69,10 @@ export function createRateLimitedFetch(
       } catch (error) {
         lastError = error;
         if (attempt === 5 || init?.signal?.aborted) throw error;
+        options.logger.warn("Retrying a transient Notion request failure", {
+          attempt: attempt + 1,
+          reason: isTimeout(error) ? "timeout" : "network",
+        });
         await delay(
           Math.min(60_000, 1_000 * 2 ** attempt) +
             Math.floor(Math.random() * 500),
@@ -53,6 +81,13 @@ export function createRateLimitedFetch(
     }
     throw lastError;
   };
+}
+
+function isTimeout(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.name === "TimeoutError" || error.name === "AbortError")
+  );
 }
 
 export class RequestScheduler {
