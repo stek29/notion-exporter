@@ -158,8 +158,10 @@ All canonical resource filenames use normalized Notion UUIDs. Resource JSON is d
 ## Scope and limits
 
 - Roots may be pages, databases or data sources.
-- `--skip` accepts repeatable IDs or URLs. A skipped object is omitted and traversal through that edge is cut; independently reachable resources remain in scope.
-- Views are exported only with their owning retained database. To exclude a database even when reachable elsewhere, skip its database ID explicitly.
+- `--skip` accepts repeatable IDs or URLs and applies globally to the specified object ID. The object is omitted wherever it is encountered, and traversal through it stops. Its descendants may still be exported if they are independently reachable through another retained root or resource.
+- Skipping a database ID omits that database regardless of how it is reached. The exporter does not list or retrieve any of that database's views, so every view owned by the skipped database is also omitted. A data source beneath it could still be exported only if independently reachable, such as by being configured as a root; its database views would remain omitted because views are never exported without their owning database.
+- Skipping a data-source ID removes it from its owning database's exported `data_sources` list and also omits views whose `data_source_id` refers to that skipped data source. Skipping a view ID omits only that view.
+- Skipping a page or block cuts traversal at that location, but does not implicitly skip a descendant database that is independently reachable elsewhere. Skip the database ID itself when the database and all of its views must always be excluded.
 - Relations are preserved as UUID references but do not implicitly expand backup scope.
 - Page properties that are complete in the Page response are persisted directly; the dedicated property endpoint is reserved for potentially truncated values and rollups.
 - Incremental exports always reconcile current reachability into a new empty snapshot; the previous snapshot is never modified in place.
