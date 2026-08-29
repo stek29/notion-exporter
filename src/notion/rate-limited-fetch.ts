@@ -9,9 +9,30 @@ export interface RateLimitOptions {
   progressEvery?: number;
 }
 
+interface RateLimitedResponseBody {
+  getReader(): {
+    cancel(): Promise<void>;
+    read(): Promise<
+      { done: true } | { done: false; value: Uint8Array<ArrayBufferLike> }
+    >;
+    releaseLock(): void;
+  };
+}
+
+interface RateLimitedResponse {
+  body: RateLimitedResponseBody | null;
+  headers: Headers;
+  ok: boolean;
+  status: number;
+  text(): Promise<string>;
+}
+
 export function createRateLimitedFetch(
   options: RateLimitOptions,
-): typeof globalThis.fetch {
+): (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<RateLimitedResponse> {
   const scheduler = new RequestScheduler(
     options.requestsPerSecond,
     options.concurrency,
@@ -28,7 +49,7 @@ export function createRateLimitedFetch(
   return async (
     input: RequestInfo | URL,
     init?: RequestInit,
-  ): Promise<Response> => {
+  ): Promise<RateLimitedResponse> => {
     let lastError: unknown;
     for (let attempt = 0; attempt < 6; attempt += 1) {
       try {
@@ -48,7 +69,7 @@ export function createRateLimitedFetch(
               requests_completed: requestsCompleted,
             });
           }
-          return response;
+          return adaptResponse(response);
         }
         await response.body?.cancel().catch(() => undefined);
 
@@ -80,6 +101,32 @@ export function createRateLimitedFetch(
       }
     }
     throw lastError;
+  };
+}
+
+function adaptResponse(response: Response): RateLimitedResponse {
+  return {
+    body: response.body
+      ? {
+          getReader: () => {
+            const reader = response.body!.getReader();
+            return {
+              cancel: () => reader.cancel(),
+              read: async () => {
+                const result = await reader.read();
+                return result.done
+                  ? { done: true }
+                  : { done: false, value: result.value };
+              },
+              releaseLock: () => reader.releaseLock(),
+            };
+          },
+        }
+      : null,
+    headers: response.headers,
+    ok: response.ok,
+    status: response.status,
+    text: () => response.text(),
   };
 }
 
