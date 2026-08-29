@@ -31,6 +31,12 @@ program
     collect,
     [],
   )
+  .option(
+    "--skip <id-or-url>",
+    "omit this object and cut traversal through it; repeat for multiple IDs",
+    collect,
+    [],
+  )
   .requiredOption("--output <path>", "empty output directory")
   .option("--cache <path>", "persistent asset cache")
   .addOption(
@@ -72,6 +78,7 @@ program
     async (
       options: CommonOptions & {
         root: string[];
+        skip: string[];
         output: string;
         cache?: string;
         comments: CommentMode;
@@ -85,6 +92,7 @@ program
       const logger = createLogger(activeLogFormat, activeVerbose);
       await runExport({
         roots: options.root,
+        skips: options.skip,
         output: options.output,
         ...(options.cache ? { cache: options.cache } : {}),
         comments: options.comments,

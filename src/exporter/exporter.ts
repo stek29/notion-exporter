@@ -27,6 +27,7 @@ import { needsIndividualPropertyRetrieval } from "./page-property.js";
 
 export interface ExportOptions {
   roots: string[];
+  skips?: string[];
   output: string;
   cache?: string;
   comments?: CommentMode;
@@ -42,6 +43,22 @@ export type CommentMode = "none" | "all";
 export async function exportSnapshot(
   options: ExportOptions,
 ): Promise<ExportStats> {
+  const normalizedRoots = [
+    ...new Set(options.roots.map(normalizeNotionId)),
+  ].sort();
+  const skipped = [
+    ...new Set((options.skips ?? []).map(normalizeNotionId)),
+  ].sort();
+  if (normalizedRoots.length === 0)
+    throw new BackupError("At least one --root is required");
+  for (const root of normalizedRoots) {
+    if (skipped.includes(root)) {
+      throw new BackupError(
+        `Notion ID is configured as both root and skip: ${root}`,
+      );
+    }
+  }
+
   const output = resolve(options.output);
   await requireEmptyDirectory(output);
   await Promise.all(
@@ -70,15 +87,12 @@ export async function exportSnapshot(
     assets,
     options.logger,
     options.comments ?? "none",
+    new Set(skipped),
   );
-  const normalizedRoots = [
-    ...new Set(options.roots.map(normalizeNotionId)),
-  ].sort();
-  if (normalizedRoots.length === 0)
-    throw new BackupError("At least one --root is required");
 
   options.logger.info("Exporting configured roots", {
     roots: normalizedRoots.length,
+    skipped: skipped.length,
   });
   for (const root of normalizedRoots) await state.exportRoot(root);
   await state.exportUsers();
@@ -86,7 +100,7 @@ export async function exportSnapshot(
   await assets.finalize();
 
   const roots = [...state.roots].sort((a, b) => a.id.localeCompare(b.id));
-  await writer.writeJson("roots.json", { roots });
+  await writer.writeJson("roots.json", { roots, skipped });
   const stats = state.stats();
   assets.applyStats(stats);
   const manifest: Manifest = {
@@ -95,6 +109,7 @@ export async function exportSnapshot(
     notion_api_version: NOTION_API_VERSION,
     exported_at: (options.now ?? (() => new Date()))().toISOString(),
     roots,
+    skipped,
     counts: {
       pages: stats.pages,
       databases: stats.databases,
@@ -121,6 +136,7 @@ class ExportState {
   private readonly dataSourceTasks = new Map<string, Promise<void>>();
   private readonly viewTasks = new Map<string, Promise<void>>();
   private readonly comments = new Map<string, Promise<void>>();
+  private readonly exportedViews = new Set<string>();
   private readonly referencedUsers = new Map<string, NotionObject[]>();
   private userCount = 0;
 
@@ -130,6 +146,7 @@ class ExportState {
     private readonly assets: AssetManager,
     private readonly logger: Logger,
     private readonly commentMode: CommentMode,
+    private readonly skipped: ReadonlySet<string>,
   ) {}
 
   public async exportRoot(id: string): Promise<void> {
@@ -161,6 +178,7 @@ class ExportState {
   }
 
   public exportPage(id: string, prefetched?: NotionObject): Promise<void> {
+    if (this.isSkipped(id)) return Promise.resolve();
     return this.memoize(this.pageTasks, id, async () => {
       const page = prefetched ?? (await this.api.retrievePage(id));
       assertObject(page, id, "page");
@@ -193,20 +211,27 @@ class ExportState {
       // Attach a handler immediately; comments and block discovery may still be running when a property fails.
       void propertiesDone.catch(() => undefined);
 
-      const tree = await retrieveBlockTree(this.api, id, async (block) => {
-        this.collectUsers(block);
-        const canonical = await this.assets.canonicalize(
-          block,
-          `page:${id}:block:${block.id}`,
-        );
-        if (
-          !isRecord(canonical) ||
-          typeof canonical.id !== "string" ||
-          typeof canonical.object !== "string"
-        )
-          throw new BackupError(`Canonicalization corrupted block ${block.id}`);
-        return canonical as NotionObject;
-      });
+      const tree = await retrieveBlockTree(
+        this.api,
+        id,
+        async (block) => {
+          this.collectUsers(block);
+          const canonical = await this.assets.canonicalize(
+            block,
+            `page:${id}:block:${block.id}`,
+          );
+          if (
+            !isRecord(canonical) ||
+            typeof canonical.id !== "string" ||
+            typeof canonical.object !== "string"
+          )
+            throw new BackupError(
+              `Canonicalization corrupted block ${block.id}`,
+            );
+          return canonical as NotionObject;
+        },
+        (block) => !this.isSkipped(block.id),
+      );
       const commentIds = new Set<string>();
       const commentTasks: Promise<void>[] = [];
       const commentLists =
@@ -219,6 +244,7 @@ class ExportState {
           : [];
       for (const listed of commentLists) {
         for (const comment of listed) {
+          if (this.isSkipped(comment.id)) continue;
           commentIds.add(comment.id);
           commentTasks.push(this.exportComment(comment));
         }
@@ -242,33 +268,47 @@ class ExportState {
   }
 
   public exportDatabase(id: string, prefetched?: NotionObject): Promise<void> {
+    if (this.isSkipped(id)) return Promise.resolve();
     return this.memoize(this.databaseTasks, id, async () => {
       const database = prefetched ?? (await this.api.retrieveDatabase(id));
       assertObject(database, id, "database");
-      this.collectUsers(database);
       this.logger.debug("Exporting database", { id });
+
+      const rawDataSources = Array.isArray(database.data_sources)
+        ? database.data_sources
+        : [];
+      const dataSources = rawDataSources.filter((source) => {
+        if (!isRecord(source) || typeof source.id !== "string") {
+          throw new BackupError(
+            `Database ${id} contains a malformed data source reference`,
+          );
+        }
+        return !this.isSkipped(source.id);
+      });
+      const retainedDatabase = Array.isArray(database.data_sources)
+        ? { ...database, data_sources: dataSources }
+        : database;
+      this.collectUsers(retainedDatabase);
       const canonical = await this.assets.canonicalize(
-        database,
+        retainedDatabase,
         `database:${id}`,
       );
       await this.writer.writeJson(`databases/${id}/database.json`, canonical);
 
-      const dataSources = Array.isArray(database.data_sources)
-        ? database.data_sources
-        : [];
       const views = await this.api.listViews(id);
       await Promise.all([
         ...dataSources.map((source) => {
-          if (!isRecord(source) || typeof source.id !== "string") {
-            throw new BackupError(
-              `Database ${id} contains a malformed data source reference`,
-            );
-          }
           return this.exportDataSource(normalizeNotionId(source.id));
         }),
         ...views.map((view) => {
           if (typeof view.id !== "string")
             throw new BackupError(`Database ${id} has malformed view`);
+          if (
+            this.isSkipped(view.id) ||
+            (typeof view.data_source_id === "string" &&
+              this.isSkipped(view.data_source_id))
+          )
+            return Promise.resolve();
           return this.exportView(id, normalizeNotionId(view.id));
         }),
       ]);
@@ -279,6 +319,7 @@ class ExportState {
     id: string,
     prefetched?: NotionObject,
   ): Promise<void> {
+    if (this.isSkipped(id)) return Promise.resolve();
     return this.memoize(this.dataSourceTasks, id, async () => {
       const dataSource = prefetched ?? (await this.api.retrieveDataSource(id));
       assertObject(dataSource, id, "data_source");
@@ -294,6 +335,7 @@ class ExportState {
       const rowTasks: Promise<void>[] = [];
       for await (const row of this.api.iterateAllDataSourceRows(id)) {
         const rowId = normalizeNotionId(row.id);
+        if (this.isSkipped(rowId)) continue;
         if (row.object === "page") {
           pageIds.add(rowId);
           rowTasks.push(this.exportPage(rowId));
@@ -359,7 +401,7 @@ class ExportState {
       pages: this.pageTasks.size,
       databases: this.databaseTasks.size,
       data_sources: this.dataSourceTasks.size,
-      views: this.viewTasks.size,
+      views: this.exportedViews.size,
       comments: this.comments.size,
       users: this.userCount,
       assets: 0,
@@ -370,19 +412,27 @@ class ExportState {
   }
 
   private exportView(databaseId: string, id: string): Promise<void> {
+    if (this.isSkipped(id)) return Promise.resolve();
     return this.memoize(this.viewTasks, id, async () => {
       const view = await this.api.retrieveView(id);
       assertObject(view, id, "view");
+      if (
+        typeof view.data_source_id === "string" &&
+        this.isSkipped(view.data_source_id)
+      )
+        return;
       this.collectUsers(view);
       const canonical = await this.assets.canonicalize(view, `view:${id}`);
       await this.writer.writeJson(
         `databases/${databaseId}/views/${id}.json`,
         canonical,
       );
+      this.exportedViews.add(id);
     });
   }
 
   private exportComment(comment: NotionObject): Promise<void> {
+    if (this.isSkipped(comment.id)) return Promise.resolve();
     return this.memoize(this.comments, comment.id, async () => {
       this.collectUsers(comment);
       const canonical = await this.assets.canonicalize(
@@ -428,6 +478,10 @@ class ExportState {
       this.viewTasks.size +
       this.comments.size
     );
+  }
+
+  private isSkipped(id: string): boolean {
+    return this.skipped.has(normalizeNotionId(id));
   }
 
   private collectUsers(value: unknown): void {

@@ -36,6 +36,7 @@ export interface Manifest {
   notion_api_version: string;
   exported_at: string;
   roots: RootRecord[];
+  skipped?: string[];
   counts: Counts;
 }
 

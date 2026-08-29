@@ -43,6 +43,7 @@ export NOTION_TOKEN_FILE=/run/secrets/notion_token
 notion-backup export \
   --root 59833787-2cf9-4fdf-8782-e53db20768a5 \
   --root https://www.notion.so/example-248104cd477e80fdb757e945d38000bd \
+  --skip 33333333-3333-3333-3333-333333333333 \
   --output /work/export \
   --cache /cache
 ```
@@ -126,6 +127,8 @@ All canonical resource filenames use normalized Notion UUIDs. Resource JSON is d
 ## Scope and limits
 
 - Roots may be pages, databases or data sources.
+- `--skip` accepts repeatable IDs or URLs. A skipped object is omitted and traversal through that edge is cut; independently reachable resources remain in scope.
+- Views are exported only with their owning retained database. To exclude a database even when reachable elsewhere, skip its database ID explicitly.
 - Relations are preserved as UUID references but do not implicitly expand backup scope.
 - Page properties that are complete in the Page response are persisted directly; the dedicated property endpoint is reserved for potentially truncated values and rollups.
 - Comments are skipped by default. Pass `--comments all` for an exhaustive, slower per-page and per-block comment scan.

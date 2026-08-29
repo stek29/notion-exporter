@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { exportSnapshot } from "../src/exporter/exporter.js";
+import { stringifyCanonical } from "../src/snapshot/canonical-json.js";
 import { verifySnapshot } from "../src/verify/verifier.js";
 import { IDS, MockNotionApi, page, silentLogger } from "./helpers/mock-api.js";
 
@@ -62,5 +63,37 @@ describe("offline verifier", () => {
     const result = await verifySnapshot(output);
     expect(result.valid).toBe(false);
     expect(result.errors.join("\n")).toContain("Asset hash mismatch");
+  });
+
+  it("rejects a resource that is also declared skipped", async () => {
+    const output = await mkdtemp(join(tmpdir(), "notion-verify-skip-"));
+    const api = new MockNotionApi();
+    api.pages.set(IDS.page1, page(IDS.page1));
+    await exportSnapshot({
+      roots: [IDS.page1],
+      output,
+      assetConcurrency: 1,
+      api,
+      logger: silentLogger(),
+    });
+    const rootsPath = join(output, "roots.json");
+    const manifestPath = join(output, "manifest.json");
+    const roots = JSON.parse(await readFile(rootsPath, "utf8")) as {
+      skipped?: string[];
+    };
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      skipped?: string[];
+    };
+    roots.skipped = [IDS.page1];
+    manifest.skipped = [IDS.page1];
+    await writeFile(rootsPath, stringifyCanonical(roots));
+    await writeFile(manifestPath, stringifyCanonical(manifest));
+
+    const result = await verifySnapshot(output);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain(
+      `Skipped resource is present: pages/${IDS.page1}/page.json`,
+    );
   });
 });

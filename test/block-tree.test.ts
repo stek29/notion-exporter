@@ -73,4 +73,42 @@ describe("recursive blocks", () => {
     expect(result.childDatabases).toEqual([IDS.database]);
     expect(result.blockIds).toEqual([IDS.page2, IDS.database]);
   });
+
+  it("cuts a skipped block and its entire subtree", async () => {
+    const api = new MockNotionApi();
+    api.blocks.set(IDS.page1, [
+      {
+        object: "block",
+        id: IDS.page2,
+        type: "child_page",
+        has_children: true,
+      },
+      {
+        object: "block",
+        id: IDS.view,
+        type: "paragraph",
+        has_children: false,
+      },
+    ]);
+    api.blocks.set(IDS.page2, [
+      {
+        object: "block",
+        id: IDS.database,
+        type: "child_database",
+        has_children: true,
+      },
+    ]);
+
+    const result = await retrieveBlockTree(
+      api,
+      IDS.page1,
+      undefined,
+      (block) => block.id !== IDS.page2,
+    );
+
+    expect(result.blocks.map((block) => block.id)).toEqual([IDS.view]);
+    expect(result.childPages).toEqual([]);
+    expect(result.childDatabases).toEqual([]);
+    expect(result.blockIds).toEqual([IDS.view]);
+  });
 });

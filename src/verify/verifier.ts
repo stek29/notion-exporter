@@ -303,12 +303,20 @@ function verifyRoots(files: Map<string, unknown>, errors: string[]): void {
     return;
   }
   const manifest = files.get("manifest.json");
+  const skipped = verifySkippedIds(rootsFile, errors);
   if (
     isManifest(manifest) &&
     JSON.stringify(manifest.roots) !== JSON.stringify(rootsFile.roots)
   ) {
     errors.push("roots.json does not match manifest roots");
   }
+  if (
+    isManifest(manifest) &&
+    JSON.stringify(manifest.skipped ?? []) !== JSON.stringify(skipped)
+  ) {
+    errors.push("roots.json skipped IDs do not match manifest");
+  }
+  verifySkippedResources(files, new Set(skipped), errors);
   const seenRoots = new Set<string>();
   for (const root of rootsFile.roots) {
     if (
@@ -326,6 +334,8 @@ function verifyRoots(files: Map<string, unknown>, errors: string[]): void {
     }
     if (seenRoots.has(id)) errors.push(`Duplicate configured root: ${id}`);
     seenRoots.add(id);
+    if (skipped.includes(id))
+      errors.push(`Notion ID is both a root and skipped: ${id}`);
     const path =
       root.type === "page"
         ? `pages/${id}/page.json`
@@ -339,6 +349,71 @@ function verifyRoots(files: Map<string, unknown>, errors: string[]): void {
     else if (!files.has(path))
       errors.push(`Missing canonical resource for root ${id}`);
   }
+}
+
+function verifySkippedResources(
+  files: Map<string, unknown>,
+  skipped: ReadonlySet<string>,
+  errors: string[],
+): void {
+  if (skipped.size === 0) return;
+  for (const id of skipped) {
+    for (const path of [
+      `pages/${id}/page.json`,
+      `databases/${id}/database.json`,
+      `data-sources/${id}/data-source.json`,
+      `comments/${id}.json`,
+    ]) {
+      if (files.has(path)) errors.push(`Skipped resource is present: ${path}`);
+    }
+    if (
+      [...files.keys()].some((path) =>
+        new RegExp(`^databases/[^/]+/views/${id}\\.json$`).test(path),
+      )
+    )
+      errors.push(`Skipped view is present: ${id}`);
+  }
+
+  const visitBlocks = (blocks: unknown[], path: string): void => {
+    for (const block of blocks) {
+      if (!isRecord(block)) continue;
+      const id =
+        typeof block.id === "string" ? safeNormalize(block.id) : undefined;
+      if (id && skipped.has(id))
+        errors.push(`Skipped block is present ${id}: ${path}`);
+      if (Array.isArray(block.children)) visitBlocks(block.children, path);
+    }
+  };
+  for (const [path, value] of files) {
+    if (/^pages\/[^/]+\/blocks\.json$/.test(path) && Array.isArray(value))
+      visitBlocks(value, path);
+  }
+}
+
+function verifySkippedIds(
+  rootsFile: Record<string, unknown>,
+  errors: string[],
+): string[] {
+  if (rootsFile.skipped === undefined) return [];
+  if (!Array.isArray(rootsFile.skipped)) {
+    errors.push("roots.json has malformed skipped IDs");
+    return [];
+  }
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of rootsFile.skipped) {
+    const id = typeof value === "string" ? safeNormalize(value) : undefined;
+    if (!id) {
+      errors.push(`roots.json contains invalid skipped ID: ${String(value)}`);
+      continue;
+    }
+    if (seen.has(id)) errors.push(`Duplicate skipped ID: ${id}`);
+    seen.add(id);
+    result.push(id);
+  }
+  if (JSON.stringify(result) !== JSON.stringify([...result].sort()))
+    errors.push("roots.json skipped IDs are not sorted");
+  return result;
 }
 
 function verifyRows(files: Map<string, unknown>, errors: string[]): void {
@@ -593,6 +668,12 @@ function isManifest(value: unknown): value is Manifest {
   ) {
     return false;
   }
+  if (
+    value.skipped !== undefined &&
+    (!Array.isArray(value.skipped) ||
+      !value.skipped.every((id) => typeof id === "string"))
+  )
+    return false;
   const counts = value.counts;
   return [
     "pages",

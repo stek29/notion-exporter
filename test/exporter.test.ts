@@ -99,6 +99,61 @@ describe("exporter", () => {
     expect(await verifySnapshot(output)).toMatchObject({ valid: true });
   });
 
+  it("cuts skipped resources without leaving orphan rows or views", async () => {
+    const output = await mkdtemp(join(tmpdir(), "notion-skipped-"));
+    const api = fixtureApi();
+
+    const stats = await exportSnapshot({
+      roots: [IDS.database],
+      skips: [IDS.page2, IDS.dataSource2],
+      output,
+      assetConcurrency: 1,
+      api,
+      logger: silentLogger(),
+    });
+
+    expect(stats).toMatchObject({ pages: 1, data_sources: 1, views: 1 });
+    const roots = JSON.parse(
+      await readFile(join(output, "roots.json"), "utf8"),
+    ) as { skipped: string[] };
+    expect(roots.skipped).toEqual([IDS.page2, IDS.dataSource2].sort());
+    const rows = JSON.parse(
+      await readFile(
+        join(output, "data-sources", IDS.dataSource, "rows.json"),
+        "utf8",
+      ),
+    ) as { pages: string[] };
+    expect(rows.pages).toEqual([IDS.page1]);
+    await expect(
+      readFile(join(output, "pages", IDS.page2, "page.json")),
+    ).rejects.toThrow();
+    await expect(
+      readFile(
+        join(output, "data-sources", IDS.dataSource2, "data-source.json"),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      readFile(
+        join(output, "databases", IDS.database, "views", `${IDS.view2}.json`),
+      ),
+    ).rejects.toThrow();
+    expect(await verifySnapshot(output)).toMatchObject({ valid: true });
+  });
+
+  it("rejects an ID configured as both a root and a skip", async () => {
+    const output = await mkdtemp(join(tmpdir(), "notion-root-skip-"));
+    await expect(
+      exportSnapshot({
+        roots: [IDS.page1],
+        skips: [IDS.page1],
+        output,
+        assetConcurrency: 1,
+        api: fixtureApi(),
+        logger: silentLogger(),
+      }),
+    ).rejects.toThrow("both root and skip");
+  });
+
   it("rejects a non-empty output directory", async () => {
     const output = await mkdtemp(join(tmpdir(), "notion-backup-nonempty-"));
     await writeFile(join(output, "keep"), "user data");

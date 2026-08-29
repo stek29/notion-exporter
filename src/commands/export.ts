@@ -5,6 +5,7 @@ import type { Logger } from "../shared/logger.js";
 
 export interface ExportCommandOptions {
   roots: string[];
+  skips: string[];
   output: string;
   cache?: string;
   comments: CommentMode;
@@ -32,6 +33,7 @@ export async function runExport(options: ExportCommandOptions): Promise<void> {
   });
   await exportSnapshot({
     roots: options.roots,
+    skips: options.skips,
     output: options.output,
     ...(options.cache ? { cache: options.cache } : {}),
     comments: options.comments,
