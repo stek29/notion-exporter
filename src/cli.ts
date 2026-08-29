@@ -4,6 +4,7 @@ import { runExport } from "./commands/export.js";
 import { runVerify } from "./commands/verify.js";
 import { loadNotionToken } from "./config/token.js";
 import { EXPORTER_VERSION } from "./constants.js";
+import type { CommentMode } from "./exporter/exporter.js";
 import { errorMessage, VerificationError } from "./shared/errors.js";
 import { createLogger, type LogFormat } from "./shared/logger.js";
 
@@ -32,6 +33,11 @@ program
   )
   .requiredOption("--output <path>", "empty output directory")
   .option("--cache <path>", "persistent asset cache")
+  .addOption(
+    new Option("--comments <mode>", "comment export mode")
+      .choices(["none", "all"])
+      .default("none"),
+  )
   .addOption(
     new Option(
       "--concurrency <number>",
@@ -68,6 +74,7 @@ program
         root: string[];
         output: string;
         cache?: string;
+        comments: CommentMode;
         concurrency: number;
         requestsPerSecond: number;
         assetConcurrency: number;
@@ -80,6 +87,7 @@ program
         roots: options.root,
         output: options.output,
         ...(options.cache ? { cache: options.cache } : {}),
+        comments: options.comments,
         concurrency: options.concurrency,
         requestsPerSecond: options.requestsPerSecond,
         assetConcurrency: options.assetConcurrency,

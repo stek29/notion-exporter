@@ -11,7 +11,8 @@ The snapshot format is versioned but the project is initially released as `0.1.0
 ## Requirements
 
 - Node.js 24 or the OCI image
-- A Notion integration with read-content, read-comments and user-information capabilities
+- A Notion token with read-content and user-information capabilities
+- Read-comments capability only when using `--comments all`
 - Each configured root shared with the integration
 
 Notion does not expose exhaustive workspace enumeration through its public API. Roots are authoritative; search is not used for backup correctness.
@@ -118,6 +119,8 @@ All canonical resource filenames use normalized Notion UUIDs. Resource JSON is d
 
 - Roots may be pages, databases or data sources.
 - Relations are preserved as UUID references but do not implicitly expand backup scope.
+- Page properties that are complete in the Page response are persisted directly; the dedicated property endpoint is reserved for potentially truncated values and rollups.
+- Comments are skipped by default. Pass `--comments all` for an exhaustive, slower per-page and per-block comment scan.
 - External URLs are not mirrored.
 - Notion search is not used as authoritative enumeration.
 - The SDK's full data-source iterator partitions query windows beyond Notion's normal 10,000-result boundary. An unpartitionable boundary fails the export.

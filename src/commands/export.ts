@@ -1,4 +1,4 @@
-import { exportSnapshot } from "../exporter/exporter.js";
+import { exportSnapshot, type CommentMode } from "../exporter/exporter.js";
 import { createNotionApi } from "../notion/api.js";
 import { BackupError } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
@@ -7,6 +7,7 @@ export interface ExportCommandOptions {
   roots: string[];
   output: string;
   cache?: string;
+  comments: CommentMode;
   concurrency: number;
   requestsPerSecond: number;
   assetConcurrency: number;
@@ -33,6 +34,7 @@ export async function runExport(options: ExportCommandOptions): Promise<void> {
     roots: options.roots,
     output: options.output,
     ...(options.cache ? { cache: options.cache } : {}),
+    comments: options.comments,
     assetConcurrency: options.assetConcurrency,
     api,
     logger: options.logger,

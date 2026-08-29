@@ -23,17 +23,21 @@ import {
 } from "../snapshot/writer.js";
 import { verifySnapshot } from "../verify/verifier.js";
 import { retrieveBlockTree } from "./block-tree.js";
+import { needsIndividualPropertyRetrieval } from "./page-property.js";
 
 export interface ExportOptions {
   roots: string[];
   output: string;
   cache?: string;
+  comments?: CommentMode;
   assetConcurrency: number;
   api: NotionApi;
   logger: Logger;
   now?: () => Date;
   assetFetch?: typeof globalThis.fetch;
 }
+
+export type CommentMode = "none" | "all";
 
 export async function exportSnapshot(
   options: ExportOptions,
@@ -60,7 +64,13 @@ export async function exportSnapshot(
     logger: options.logger,
     ...(options.assetFetch ? { fetch: options.assetFetch } : {}),
   });
-  const state = new ExportState(options.api, writer, assets, options.logger);
+  const state = new ExportState(
+    options.api,
+    writer,
+    assets,
+    options.logger,
+    options.comments ?? "none",
+  );
   const normalizedRoots = [
     ...new Set(options.roots.map(normalizeNotionId)),
   ].sort();
@@ -119,6 +129,7 @@ class ExportState {
     private readonly writer: SnapshotWriter,
     private readonly assets: AssetManager,
     private readonly logger: Logger,
+    private readonly commentMode: CommentMode,
   ) {}
 
   public async exportRoot(id: string): Promise<void> {
@@ -165,10 +176,12 @@ class ExportState {
         if (!isRecord(property) || typeof property.id !== "string") {
           throw new BackupError(`Page ${id} contains a malformed property`);
         }
-        const full = await this.api.retrievePageProperty(id, property.id);
-        this.collectUsers(full);
+        const complete = needsIndividualPropertyRetrieval(property)
+          ? await this.api.retrievePageProperty(id, property.id)
+          : property;
+        this.collectUsers(complete);
         const canonical = await this.assets.canonicalize(
-          full,
+          complete,
           `page:${id}:property:${property.id}`,
         );
         await this.writer.writeJson(
@@ -196,9 +209,14 @@ class ExportState {
       });
       const commentIds = new Set<string>();
       const commentTasks: Promise<void>[] = [];
-      const commentLists = await Promise.all(
-        [id, ...tree.blockIds].map((anchor) => this.api.listComments(anchor)),
-      );
+      const commentLists =
+        this.commentMode === "all"
+          ? await Promise.all(
+              [id, ...tree.blockIds].map((anchor) =>
+                this.api.listComments(anchor),
+              ),
+            )
+          : [];
       for (const listed of commentLists) {
         for (const comment of listed) {
           commentIds.add(comment.id);

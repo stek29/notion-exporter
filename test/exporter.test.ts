@@ -13,6 +13,7 @@ describe("exporter", () => {
     const stats = await exportSnapshot({
       roots: [IDS.database, IDS.database.replaceAll("-", "")],
       output,
+      comments: "all",
       assetConcurrency: 2,
       api,
       logger: silentLogger(),
@@ -28,6 +29,10 @@ describe("exporter", () => {
     });
     // Repeated roots and repeated data-source rows still produce one canonical page.
     expect(stats.pages).toBe(2);
+    expect(api.commentRetrievals.length).toBeGreaterThan(0);
+    expect(api.pagePropertyRetrievals.sort()).toEqual(
+      [`${IDS.page1}:rel`, `${IDS.page1}:rollup`].sort(),
+    );
     expect(await verifySnapshot(output)).toMatchObject({ valid: true });
 
     const rows = JSON.parse(
@@ -75,6 +80,23 @@ describe("exporter", () => {
       }),
     ).rejects.toThrow("mid-export failure");
     await expect(readFile(join(output, "manifest.json"))).rejects.toThrow();
+  });
+
+  it("skips all comment API calls by default", async () => {
+    const output = await mkdtemp(join(tmpdir(), "notion-no-comments-"));
+    const api = fixtureApi();
+
+    const stats = await exportSnapshot({
+      roots: [IDS.page1],
+      output,
+      assetConcurrency: 1,
+      api,
+      logger: silentLogger(),
+    });
+
+    expect(api.commentRetrievals).toEqual([]);
+    expect(stats.comments).toBe(0);
+    expect(await verifySnapshot(output)).toMatchObject({ valid: true });
   });
 
   it("rejects a non-empty output directory", async () => {

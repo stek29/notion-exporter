@@ -16,6 +16,8 @@ export class MockNotionApi implements NotionApi {
   public readonly rows = new Map<string, NotionObject[]>();
   public users: NotionObject[] = [];
   public pageRetrievals = new Map<string, number>();
+  public pagePropertyRetrievals: string[] = [];
+  public commentRetrievals: string[] = [];
 
   public async retrievePage(id: string): Promise<NotionObject> {
     this.pageRetrievals.set(id, (this.pageRetrievals.get(id) ?? 0) + 1);
@@ -36,6 +38,7 @@ export class MockNotionApi implements NotionApi {
     pageId: string,
     propertyId: string,
   ): Promise<Record<string, unknown>> {
+    this.pagePropertyRetrievals.push(`${pageId}:${propertyId}`);
     const value = this.properties.get(`${pageId}:${propertyId}`);
     if (!value)
       throw new Error(`Missing property fixture ${pageId}:${propertyId}`);
@@ -47,6 +50,7 @@ export class MockNotionApi implements NotionApi {
   }
 
   public async listComments(blockId: string): Promise<NotionObject[]> {
+    this.commentRetrievals.push(blockId);
     return this.comments.get(blockId) ?? [];
   }
 
