@@ -2,7 +2,7 @@
 
 `notion-backup` creates complete, deterministic filesystem snapshots of configured Notion roots using only the official Notion API and `@notionhq/client`.
 
-Every export starts with an empty directory, recursively traverses all reachable pages, blocks, databases, data sources and views, downloads Notion-hosted assets, and runs an offline verifier before succeeding. Historical snapshots, deduplication, retention and remote storage belong to tools such as restic.
+Every export starts with an empty directory, recursively traverses all reachable pages, blocks, databases, data sources and views, downloads hosted assets, and runs an offline verifier before succeeding. Snapshot retention and remote-storage orchestration are outside this tool's scope.
 
 ## Status
 
@@ -25,7 +25,9 @@ do not make this tool the only thing standing between you and data loss.
 
 Notion does not expose exhaustive workspace enumeration through its public API. Roots are authoritative; search is not used for backup correctness.
 
-## Installation
+## Local installation
+
+This is only required when running from a source checkout. Docker users can run the published image directly as described below.
 
 ```bash
 npm ci
@@ -107,31 +109,27 @@ The verifier checks snapshot structure, all JSON files, manifest counts, canonic
 
 ## Container
 
+Prebuilt `linux/amd64` and `linux/arm64` images are published to GitHub Container Registry. Docker pulls the image automatically when it is not already present:
+
 ```bash
-docker build -t notion-backup .
+mkdir -p "$PWD/export"
 
 docker run --rm \
   --user "$(id -u):$(id -g)" \
   -e NOTION_TOKEN_FILE=/run/secrets/notion_token \
   -v "$PWD/notion-token:/run/secrets/notion_token:ro" \
   -v "$PWD/export:/work/export" \
-  notion-backup export \
+  ghcr.io/stek29/notion-exporter:latest export \
   --root ... \
   --output /work/export
 ```
 
-The image is one-shot, runs as a non-root user by default, and contains no scheduler or restic installation.
+Use a release tag instead of `latest` when reproducible image selection is required. The image is one-shot, runs as a non-root user by default, and contains no scheduler.
 
-## Restic boundary
+Building locally is optional and primarily useful while developing changes:
 
 ```bash
-rm -rf /work/export
-mkdir -p /work/export
-
-notion-backup export --root ... --output /work/export
-restic backup /work/export --tag notion
-
-rm -rf /work/export
+docker build -t notion-backup:local .
 ```
 
 A failed export is nonzero and leaves partial output for diagnosis. The next orchestration run is responsible for cleaning it.
@@ -169,7 +167,7 @@ All canonical resource filenames use normalized Notion UUIDs. Resource JSON is d
 - External content URLs are not mirrored, except user avatars.
 - Notion search is not used as authoritative enumeration.
 - The SDK's full data-source iterator partitions query windows beyond Notion's normal 10,000-result boundary. An unpartitionable boundary fails the export.
-- The tool does not implement incremental sync, restoration, Markdown export, scheduling, retention or restic invocation.
+- The tool does not implement incremental sync, restoration, Markdown export, scheduling, retention or remote-storage orchestration.
 
 ## Development
 
