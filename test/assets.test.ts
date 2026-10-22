@@ -94,6 +94,34 @@ describe("assets", () => {
       await readFile(join(secondOutput, reused.file.backup_asset.path), "utf8"),
     ).toBe("hello");
   });
+
+  it("names the failing asset and its cause without the signed query", async () => {
+    const warn = vi.fn();
+    const failing = vi.fn(async () => new Response("denied", { status: 403 }));
+    const manager = new AssetManager({
+      writer: new SnapshotWriter(await outputDirectory()),
+      concurrency: 1,
+      logger: { ...silentLogger(), warn },
+      fetch: failing as typeof fetch,
+    });
+    const input = {
+      type: "file",
+      name: "doc.pdf",
+      file: { url: "https://files.example/ws/doc.pdf?X-Amz-Signature=secret" },
+    };
+    const error = await manager
+      .canonicalize(input, "page:abc.properties.Files")
+      .then(
+        () => new Error("unexpected success"),
+        (caught: unknown) => caught as Error,
+      );
+    expect(error.message).toContain("https://files.example/ws/doc.pdf");
+    expect(error.message).toContain("page:abc.properties.Files");
+    expect(error.message).toContain("HTTP 403");
+    expect(error.message).not.toContain("secret");
+    expect(warn).toHaveBeenCalledTimes(4);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("secret");
+  }, 15_000);
 });
 
 async function outputDirectory(): Promise<string> {

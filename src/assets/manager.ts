@@ -15,7 +15,7 @@ import { basename, dirname, extname, join } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { DETERMINISTIC_MTIME } from "../constants.js";
-import { BackupError } from "../shared/errors.js";
+import { BackupError, errorMessage } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import { Semaphore } from "../shared/semaphore.js";
 import type { ExportStats, JsonObject, JsonValue } from "../shared/types.js";
@@ -94,7 +94,7 @@ export class AssetManager {
       typeof record.file.url === "string"
     ) {
       const filename = inferFilename(record, record.file.url);
-      const asset = await this.store(record.file.url, filename);
+      const asset = await this.store(record.file.url, filename, source);
       const preserved = Object.fromEntries(
         Object.entries(record).filter(
           ([key]) => key !== "file" && key !== "expiry_time",
@@ -117,7 +117,11 @@ export class AssetManager {
     ) {
       const emoji = record.custom_emoji;
       const emojiUrl = record.custom_emoji.url;
-      const asset = await this.store(emojiUrl, inferFilename(emoji, emojiUrl));
+      const asset = await this.store(
+        emojiUrl,
+        inferFilename(emoji, emojiUrl),
+        source,
+      );
       return this.canonicalize(
         {
           ...record,
@@ -137,7 +141,11 @@ export class AssetManager {
         .filter(([key, child]) => key !== "request_id" && child !== undefined)
         .map(async ([key, child]) => {
           if (key === "avatar_url" && typeof child === "string") {
-            const asset = await this.store(child, inferFilename(record, child));
+            const asset = await this.store(
+              child,
+              inferFilename(record, child),
+              source,
+            );
             return [key, { backup_asset: asset }] as const;
           }
           return [
@@ -186,12 +194,18 @@ export class AssetManager {
     stats.downloaded_bytes = this.downloadedBytes;
   }
 
-  private async store(url: string, filename?: string): Promise<AssetRecord> {
+  private async store(
+    url: string,
+    filename: string | undefined,
+    source: string,
+  ): Promise<AssetRecord> {
     await this.loadPreviousIndex();
     const locator = stableLocatorKey(url);
     let pending = this.byLocator.get(locator);
     if (!pending) {
-      pending = this.semaphore.run(() => this.obtain(url, locator, filename));
+      pending = this.semaphore.run(() =>
+        this.obtain(url, locator, filename, source),
+      );
       this.byLocator.set(locator, pending);
     }
     const asset = await pending;
@@ -211,7 +225,8 @@ export class AssetManager {
   private async obtain(
     url: string,
     locator: string,
-    filename?: string,
+    filename: string | undefined,
+    source: string,
   ): Promise<AssetRecord> {
     const previous = this.assetIndex.get(locator);
     if (previous && this.options.previous) {
@@ -234,7 +249,7 @@ export class AssetManager {
       this.assetIndex.delete(locator);
     }
 
-    const downloaded = await this.download(url, filename);
+    const downloaded = await this.download(url, filename, source);
     const record = await this.moveIntoSnapshot(
       downloaded.temporary,
       downloaded,
@@ -253,7 +268,8 @@ export class AssetManager {
 
   private async download(
     url: string,
-    filename?: string,
+    filename: string | undefined,
+    source: string,
   ): Promise<AssetIndexEntry & { temporary: string }> {
     const temporaryDirectory = this.options.writer.path(".asset-tmp");
     await mkdir(temporaryDirectory, { recursive: true });
@@ -302,12 +318,18 @@ export class AssetManager {
         };
       } catch (error) {
         lastError = error;
+        this.options.logger.warn("Asset download attempt failed", {
+          source,
+          asset: describeUrl(url),
+          attempt: attempt + 1,
+          error: causeChain(error),
+        });
         await unlink(temporary).catch(() => undefined);
         if (attempt < 3) await delay(500 * 2 ** attempt);
       }
     }
     throw new BackupError(
-      "Required Notion-hosted asset could not be downloaded",
+      `Required Notion-hosted asset could not be downloaded: ${describeUrl(url)} at ${source} (${causeChain(lastError)})`,
       { cause: lastError },
     );
   }
@@ -491,6 +513,24 @@ async function copyEfficient(
 async function normalizeSnapshotAsset(path: string): Promise<void> {
   await chmod(path, 0o644);
   await utimes(path, DETERMINISTIC_MTIME, DETERMINISTIC_MTIME);
+}
+
+// Origin and path only: the query string carries the signed credential.
+function describeUrl(rawUrl: string): string {
+  const url = new URL(rawUrl);
+  return `${url.origin}${url.pathname}`;
+}
+
+function causeChain(error: unknown): string {
+  const parts: string[] = [];
+  for (
+    let current: unknown = error;
+    current !== undefined && parts.length < 5;
+    current = current instanceof Error ? current.cause : undefined
+  ) {
+    parts.push(errorMessage(current));
+  }
+  return parts.join(": ");
 }
 
 function stableLocatorKey(rawUrl: string): string {
