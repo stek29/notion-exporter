@@ -81,7 +81,7 @@ jobs:
     concurrency:
       group: ghcr-cleanup
     steps:
-      - uses: dataaxiom/ghcr-cleanup-action@v1.2.2
+      - uses: dataaxiom/ghcr-cleanup-action@v1.3.0
         with:
           owner: ${{ github.repository_owner }}
           package: ${{ github.event.repository.name }}
